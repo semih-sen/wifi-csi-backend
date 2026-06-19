@@ -94,9 +94,22 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
                         // ── Broadcast filtered data via SignalR ──
                         // We send the latest frame (most recent timestamp) along with
                         // its now-populated SubcarrierAmplitudes for visualization.
+                        // ONNX için 6400 elemanlı (flattened) matrisimiz var. 
+                        // Sadece SignalR (Grafik) için son anı (t = 99) cımbızlıyoruz:
+                        int subcarrierCount = filteredSignal.Length / _options.WindowSize;
+                        var latestAmplitudes = new float[subcarrierCount];
+
+                        for (int sc = 0; sc < subcarrierCount; sc++)
+                        {
+                            // Matristeki her alt taşıyıcının son zaman indeksini (WindowSize - 1) çekiyoruz
+                            int offset = sc * _options.WindowSize;
+                            latestAmplitudes[sc] = filteredSignal[offset + (_options.WindowSize - 1)];
+                        }
+
                         var latestFrame = windowBuffer[_options.WindowSize - 1];
-                        latestFrame.SubcarrierAmplitudes = filteredSignal;
-                        latestFrame.SubcarrierCount = filteredSignal.Length / _options.WindowSize;
+                        // 6400 elemanlı diziyi değil, sadece güncel 64 elemanlı diziyi ön yüze veriyoruz
+                        latestFrame.SubcarrierAmplitudes = latestAmplitudes;
+                        latestFrame.SubcarrierCount = subcarrierCount;
 
                         await _broadcastService.BroadcastCsiDataAsync(latestFrame, stoppingToken);
 

@@ -67,6 +67,18 @@ builder.Services.AddSingleton<IBroadcastService, BroadcastService>();
 //         inputColumnName: "input",
 //         outputColumnName: "output");
 
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll", builder =>
+    {
+        builder.SetIsOriginAllowed(_ => true)
+               .AllowAnyMethod()
+               .AllowAnyHeader()
+               .AllowCredentials();
+    });
+});
+
+
 // ──────────────────────────────────────────────────────
 // 5. SIGNALR — Real-time WebSocket communication
 // ──────────────────────────────────────────────────────
@@ -105,6 +117,8 @@ builder.Logging.AddDebug();
 // BUILD & RUN
 // ──────────────────────────────────────────────────────
 var app = builder.Build();
+
+app.UseCors("AllowAll");
 
 // Map the SignalR hub endpoint
 app.MapHub<RadarHub>("/hubs/radar");
