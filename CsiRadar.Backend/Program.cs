@@ -3,6 +3,7 @@ using CsiRadar.Backend.Application.MachineLearning;
 using CsiRadar.Backend.Application.Processing;
 using CsiRadar.Backend.Core.Configuration;
 using CsiRadar.Backend.Core.Interfaces;
+using CsiRadar.Backend.Infrastructure.Broadcasting;
 using CsiRadar.Backend.Infrastructure.Mqtt;
 using CsiRadar.Backend.Infrastructure.SignalR;
 
@@ -50,8 +51,7 @@ builder.Services.AddSingleton<ISignalProcessor, SignalFilteringService>();
 builder.Services.AddSingleton<IOnnxModelEvaluator, OnnxModelEvaluator>();
 
 // Broadcast Service: SignalR push + MQTT automation publishing.
-// TODO: Register the concrete BroadcastService implementation in Step 2.
-// builder.Services.AddSingleton<IBroadcastService, BroadcastService>();
+builder.Services.AddSingleton<IBroadcastService, BroadcastService>();
 
 // ──────────────────────────────────────────────────────
 // 4. ML.NET — PredictionEnginePool for thread-safe ONNX inference
@@ -92,8 +92,7 @@ builder.Services.AddHostedService<MqttListenerBackgroundService>();
 
 // Consumer: Processing pipeline that reads from the channel,
 // filters signals, runs inference, and broadcasts results.
-// TODO: Enable when processing pipeline is implemented (Step 2).
-// builder.Services.AddHostedService<CsiProcessingBackgroundService>();
+builder.Services.AddHostedService<CsiProcessingBackgroundService>();
 
 // ──────────────────────────────────────────────────────
 // 7. LOGGING — Structured logging configuration
