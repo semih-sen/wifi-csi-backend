@@ -15,14 +15,29 @@ public sealed class CsiData
     public long TimestampTicks { get; set; }
 
     /// <summary>
-    /// Raw CSI amplitude values extracted from the ESP32 payload.
-    /// Each element represents the amplitude of a subcarrier.
-    /// Typical length: 64 or 128 subcarriers depending on bandwidth.
+    /// Raw interleaved CSI I/Q values directly from the ESP32 payload.
+    /// Format: [imaginary_0, real_0, imaginary_1, real_1, ...].
+    /// Amplitude and phase are computed downstream in the Processing layer.
+    /// </summary>
+    public int[] RawCsiData { get; set; } = [];
+
+    /// <summary>
+    /// Number of valid elements in <see cref="RawCsiData"/>.
+    /// Allows reusing array buffers larger than needed (ArrayPool).
+    /// </summary>
+    public int RawDataLength { get; set; }
+
+    /// <summary>
+    /// Processed CSI amplitude values per subcarrier.
+    /// Computed from RawCsiData in the Processing layer via sqrt(I² + Q²).
+    /// Empty until processed by <see cref="Core.Interfaces.ISignalProcessor"/>.
     /// </summary>
     public float[] SubcarrierAmplitudes { get; set; } = [];
 
     /// <summary>
-    /// Optional: Raw CSI phase values (radians) per subcarrier.
+    /// Processed CSI phase values (radians) per subcarrier.
+    /// Computed from RawCsiData in the Processing layer via atan2(I, Q).
+    /// Empty until processed by <see cref="Core.Interfaces.ISignalProcessor"/>.
     /// </summary>
     public float[] SubcarrierPhases { get; set; } = [];
 
@@ -32,8 +47,13 @@ public sealed class CsiData
     public int Rssi { get; set; }
 
     /// <summary>
-    /// The length of valid data in SubcarrierAmplitudes.
-    /// Allows reusing array buffers larger than needed.
+    /// Number of subcarriers (computed from RawDataLength / 2).
+    /// Set by the Processing layer after I/Q separation.
     /// </summary>
     public int SubcarrierCount { get; set; }
+
+    /// <summary>
+    /// Source MAC address of the transmitting ESP32.
+    /// </summary>
+    public string? SourceMac { get; set; }
 }

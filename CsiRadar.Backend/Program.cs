@@ -40,8 +40,8 @@ builder.Services.AddSingleton<CsiDataChannelManager>();
 // ──────────────────────────────────────────────────────
 
 // MQTT Client: Handles connection to Mosquitto broker and message publishing.
-// TODO: Register the concrete MqttClientService implementation in Step 2.
-// builder.Services.AddSingleton<IMqttClientService, MqttClientService>();
+// Registered as singleton — shared between the listener (producer) and broadcast (publisher).
+builder.Services.AddSingleton<IMqttClientService, MqttClientService>();
 
 // Signal Processor: Baseline subtraction + Butterworth filtering (Math.NET).
 builder.Services.AddSingleton<ISignalProcessor, SignalFilteringService>();
@@ -88,8 +88,7 @@ builder.Services.AddSignalR(options =>
 // ──────────────────────────────────────────────────────
 
 // Producer: MQTT listener that ingests CSI data into the channel.
-// TODO: Enable when IMqttClientService is implemented (Step 2).
-// builder.Services.AddHostedService<MqttListenerBackgroundService>();
+builder.Services.AddHostedService<MqttListenerBackgroundService>();
 
 // Consumer: Processing pipeline that reads from the channel,
 // filters signals, runs inference, and broadcasts results.
