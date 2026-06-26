@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>CSI Radar - Ham Veri Monitörü</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body { 
+            background-color: #0d1117; 
+            color: #00ff00; 
+            font-family: 'Courier New', Courier, monospace; 
+            text-align: center; 
+            margin: 0;
+            padding: 20px;
+        }
+        canvas { 
+            max-width: 95%; 
+            margin: 20px auto; 
+            background: #161b22; 
+            border: 1px solid #30363d; 
+            border-radius: 8px;
+            box-shadow: 0 0 15px rgba(0, 255, 0, 0.1);
+        }
+        #info-panel { 
+            margin: 15px; 
+            font-size: 1.2em; 
+            font-weight: bold;
+            padding: 15px;
+            background: #21262d;
+            border-radius: 8px;
+            display: inline-block;
+        }
+        .input-group { margin-bottom: 20px; }
+        input { 
+            background: #0d1117; 
+            color: #00ff00; 
+            border: 1px solid #30363d; 
+            padding: 8px; 
+            font-size: 1em;
+            border-radius: 4px;
+        }
+        button { 
+            background: #238636; 
+            color: #ffffff; 
+            padding: 8px 20px; 
+            border: none; 
+            border-radius: 4px;
+            cursor: pointer; 
+            font-weight: bold; 
+            font-size: 1em;
+        }
+        button:hover { background: #2ea043; }
+        .alert { color: #ff4444; }
+    </style>
+</head>
+<body>
+
+    <h2>📡 Wi-Fi CSI 64-Alt Taşıyıcı Monitörü</h2>
+    
+    <div class="input-group">
+        Broker WS URL: 
+        <input type="text" id="brokerUrl" value="ws://192.168.1.54:9001" size="30">
+        <button onclick="connectMqtt()">Ateşle</button>
+    </div>
+
+    <div id="info-panel">
+        Durum: <span id="status" style="color:#888;">Bağlantı Bekleniyor...</span> | 
+        MAC: <span id="mac">--</span> | 
+        RSSI: <span id="rssi">--</span> dBm
+    </div>
+
+    <canvas id="csiChart"></canvas>
+
+    <script>
+        // --- 1. GRAFİK KURULUMU (Chart.js) ---
+        const ctx = document.getElementById('csiChart').getContext('2d');
+        const labels = Array.from({length: 64}, (_, i) => i + 1); // 1'den 64'e alt taşıyıcılar
+        
+        const csiChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Sinyal Genliği (Amplitude)',
+                    data: Array(64).fill(0),
+                    borderColor: '#00ff00',
+                    backgroundColor: 'rgba(0, 255, 0, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.2,
+                    pointRadius: 0, // 100 FPS'de noktaları çizmek CPU'yu boğar, kapattık
+                    fill: true
+                }]
+            },
+            options: {
+                responsive: true,
+                animation: false, // Gerçek zamanlı akış için animasyon KESİNLİKLE kapalı olmalı
+                scales: {
+                    y: { 
+                        min: 0, 
+                        max: 60, // Kendi odanın gürültüsüne göre burayı artırabilirsin
+                        title: { display: true, text: 'Genlik Değeri', color: '#8b949e' }, 
+                        ticks: { color: '#00ff00' },
+                        grid: { color: '#30363d' }
+                    },
+                    x: { 
+                        title: { display: true, text: 'Alt Taşıyıcı İndeksi (Subcarrier)', color: '#8b949e' }, 
+                        ticks: { color: '#8b949e' },
+                        grid: { color: '#30363d' }
+                    }
+                },
+                plugins: { 
+                    legend: { labels: { color: '#c9d1d9' } } 
+                }
+            }
+        });
+
+        let client;
+
+        // --- 2. MQTT BAĞLANTISI VE VERİ İŞLEME ---
+        function connectMqtt() {
+            const url = document.getElementById('brokerUrl').value;
+            document.getElementById('status').innerText = "Bağlanıyor...";
+            document.getElementById('status').style.color = "#ffcc00";
+
+            if (client) {
+                client.end(); // Eski bağlantı varsa kopar
+            }
+
+            // MQTT.js ile WebSocket bağlantısı kur
+            client = mqtt.connect(url);
+
+            client.on('connect', function () {
+                document.getElementById('status').innerText = "Bağlandı, Veri Akıyor!";
+                document.getElementById('status').style.color = "#00ff00";
+                client.subscribe('sensor/csi/raw');
+            });
+
+            client.on('message', function (topic, message) {
+                try {
+                    // ESP32'den gelen 128'lik devasa JSON'u parse et
+                    const payload = JSON.parse(message.toString());
+                    const rawData = payload.data;
+                    const amplitudes = [];
+
+                    // 128 elemanlı dizi: [Sanal0, Gerçek0, Sanal1, Gerçek1, ...]
+                    // Pisagor teoremiyle genliğe (amplitude) çeviriyoruz
+                    for (let i = 0; i < rawData.length; i += 2) {
+                        const im = rawData[i];
+                        const re = rawData[i + 1];
+                        const amp = Math.sqrt((im * im) + (re * re));
+                        amplitudes.push(amp);
+                    }
+
+                    // Grafiği en taze 64 genlik verisiyle güncelle
+                    csiChart.data.datasets[0].data = amplitudes;
+                    csiChart.update();
+                    
+                    // Bilgi panelini güncelle
+                    document.getElementById('mac').innerText = payload.mac;
+                    document.getElementById('rssi').innerText = payload.rssi;
+                        
+                } catch (e) {
+                    console.error("JSON Parse Hatası (Frame atlandı):", e);
+                }
+            });
+
+            client.on('error', function (err) {
+                console.error("MQTT Hatası: ", err);
+                document.getElementById('status').innerText = "Bağlantı Hatası! (Port 9001 WebSockets açık mı?)";
+                document.getElementById('status').className = "alert";
+            });
+        }
+    </script>
+</body>
+</html>

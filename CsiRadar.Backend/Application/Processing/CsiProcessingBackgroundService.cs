@@ -17,14 +17,17 @@ namespace CsiRadar.Backend.Application.Processing;
 ///   1. Read a raw CSI frame from Channel&lt;CsiData&gt; via ReadAllAsync.
 ///   2. Demodulate + baseline-subtract + IIR-filter it via <see cref="ICsiStreamProcessor"/>
 ///      and append the filtered frame to a flat <see cref="CsiRingBuffer"/>.
-///   3. Once a full window has accumulated and a SlideStep has elapsed, snapshot
+///   3. Tap the filtered frame into <see cref="IRecordingService"/> (a no-op when
+///      not recording) so the training set is the exact signal the model sees.
+///   4. Once a full window has accumulated and a SlideStep has elapsed, snapshot
 ///      the ring (subcarrier-major) into a pooled buffer for ML inference and
 ///      enqueue the latest filtered frame onto the loss-tolerant broadcast channel.
 ///
 /// The filter runs once per frame, so overlapping windows are free and the IIR
-/// state is never corrupted. The consumer never awaits the network: graph frames
-/// go onto <see cref="SignalBroadcastChannelManager"/> via a non-blocking write,
-/// so a slow SignalR client cannot stall ingestion.
+/// state is never corrupted. The consumer never awaits the network or the disk:
+/// graph frames go onto <see cref="SignalBroadcastChannelManager"/> and recording
+/// frames onto the recording channel, both via non-blocking writes — a slow
+/// SignalR client or a stalled disk cannot stall ingestion.
 ///
 /// ONNX inference (Step 4) is wired but disabled until the trained model lands.
 /// </summary>
@@ -34,6 +37,7 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
     private readonly ICsiStreamProcessor _processor;
     private readonly IOnnxModelEvaluator _modelEvaluator;
     private readonly SignalBroadcastChannelManager _broadcastChannel;
+    private readonly IRecordingService _recordingService;
     private readonly ProcessingOptions _options;
     private readonly ILogger<CsiProcessingBackgroundService> _logger;
 
@@ -46,6 +50,7 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
         ICsiStreamProcessor processor,
         IOnnxModelEvaluator modelEvaluator,
         SignalBroadcastChannelManager broadcastChannel,
+        IRecordingService recordingService,
         IOptions<ProcessingOptions> options,
         ILogger<CsiProcessingBackgroundService> logger)
     {
@@ -53,6 +58,7 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
         _processor = processor;
         _modelEvaluator = modelEvaluator;
         _broadcastChannel = broadcastChannel;
+        _recordingService = recordingService;
         _options = options.Value;
         _logger = logger;
     }
@@ -98,11 +104,17 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
                     framesSinceWindow = 0;
                 }
 
-                // Filter this frame exactly once; append to the ring.
+                // Filter this frame exactly once.
                 int n = _processor.ProcessFrame(csiData, frameBuf);
                 if (n == 0)
                     continue;
 
+                // ── Recording tap (no-op when idle; non-blocking when active) ──
+                // Records the full per-frame filtered stream — the exact signal the
+                // model consumes — so offline windowing reproduces inference 1:1.
+                _recordingService.Capture(frameBuf.AsSpan(0, n), csiData);
+
+                // Append to the ring for windowed inference / broadcast.
                 ring.Write(frameBuf.AsSpan(0, n));
                 framesSinceWindow++;
 
