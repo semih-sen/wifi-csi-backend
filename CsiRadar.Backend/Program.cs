@@ -1,6 +1,7 @@
 using CsiRadar.Backend.Application.Channels;
 using CsiRadar.Backend.Application.MachineLearning;
 using CsiRadar.Backend.Application.Processing;
+using CsiRadar.Backend.Application.Recording;
 using CsiRadar.Backend.Core.Configuration;
 using CsiRadar.Backend.Core.Interfaces;
 using CsiRadar.Backend.Infrastructure.Broadcasting;
@@ -58,6 +59,10 @@ builder.Services.AddSingleton<IOnnxModelEvaluator, OnnxModelEvaluator>();
 // Broadcast Service: SignalR push + MQTT automation publishing.
 builder.Services.AddSingleton<IBroadcastService, BroadcastService>();
 
+// Recording Service (Hem arayüzü hem de concrete sınıfı kullanıldığı için böyle kaydediyoruz)
+builder.Services.AddSingleton<RecordingService>();
+builder.Services.AddSingleton<IRecordingService>(sp => sp.GetRequiredService<RecordingService>());
+
 // ──────────────────────────────────────────────────────
 // 4. ML.NET — PredictionEnginePool for thread-safe ONNX inference
 // ──────────────────────────────────────────────────────
@@ -113,6 +118,8 @@ builder.Services.AddHostedService<CsiProcessingBackgroundService>();
 
 // Broadcast pump: drains the broadcast channel to SignalR off the consumer thread.
 builder.Services.AddHostedService<BroadcastBackgroundService>();
+// Disk yazıcı işçi (Kayıt kanalını boşaltan motor)
+builder.Services.AddHostedService<RecordingBackgroundService>();
 
 // ──────────────────────────────────────────────────────
 // 7. LOGGING — Structured logging configuration
