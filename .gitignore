@@ -1,3 +1,6 @@
 CsiRadar.Backend/bin/
 CsiRadar.Backend/obj/
+CsiRadar.Backend.Tests/bin/
+CsiRadar.Backend.Tests/obj/
+
 .vs/

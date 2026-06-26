@@ -63,7 +63,13 @@ public sealed class CsiPayloadDto
 
     /// <summary>
     /// Raw interleaved CSI I/Q data: [imag_0, real_0, imag_1, real_1, ...].
+    /// ESP-IDF's <c>wifi_csi_info_t</c> emits each sample as a signed 8-bit
+    /// integer (int8_t, −128..127), so this is modeled as <see cref="sbyte"/>[]
+    /// to avoid a 4× memory inflation on the hot path. System.Text.Json
+    /// deserializes the JSON number array directly into sbyte[]; out-of-range
+    /// values raise a <see cref="System.Text.Json.JsonException"/> that the
+    /// listener counts as a deserialization error.
     /// </summary>
     [JsonPropertyName("data")]
-    public int[]? Data { get; set; }
+    public sbyte[]? Data { get; set; }
 }

@@ -1,7 +1,9 @@
+using System.Buffers;
 using CsiRadar.Backend.Application.Channels;
 using CsiRadar.Backend.Core.Configuration;
 using CsiRadar.Backend.Core.Entities;
 using CsiRadar.Backend.Core.Interfaces;
+using CsiRadar.Backend.Infrastructure.Broadcasting;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -11,24 +13,27 @@ namespace CsiRadar.Backend.Application.Processing;
 /// <summary>
 /// Background service that acts as the CONSUMER in the Producer-Consumer pipeline.
 ///
-/// Workflow:
-///   1. Reads CSI frames from Channel&lt;CsiData&gt; via ReadAllAsync
-///   2. Accumulates frames into a circular sliding window buffer
-///   3. When the window is full, passes it to ISignalProcessor for filtering
-///   4. Forwards filtered results to IBroadcastService for SignalR push
-///   5. Slides the window forward by SlideStep frames
+/// Stream model (per frame, exactly once):
+///   1. Read a raw CSI frame from Channel&lt;CsiData&gt; via ReadAllAsync.
+///   2. Demodulate + baseline-subtract + IIR-filter it via <see cref="ICsiStreamProcessor"/>
+///      and append the filtered frame to a flat <see cref="CsiRingBuffer"/>.
+///   3. Once a full window has accumulated and a SlideStep has elapsed, snapshot
+///      the ring (subcarrier-major) into a pooled buffer for ML inference and
+///      enqueue the latest filtered frame onto the loss-tolerant broadcast channel.
 ///
-/// The ONNX inference step is skipped in this iteration (Step 3).
-/// It will be wired in Step 4 when the Python model is trained.
+/// The filter runs once per frame, so overlapping windows are free and the IIR
+/// state is never corrupted. The consumer never awaits the network: graph frames
+/// go onto <see cref="SignalBroadcastChannelManager"/> via a non-blocking write,
+/// so a slow SignalR client cannot stall ingestion.
 ///
-/// This service runs on its own thread, completely decoupled from MQTT ingestion.
+/// ONNX inference (Step 4) is wired but disabled until the trained model lands.
 /// </summary>
 public sealed class CsiProcessingBackgroundService : BackgroundService
 {
     private readonly CsiDataChannelManager _channelManager;
-    private readonly ISignalProcessor _signalProcessor;
+    private readonly ICsiStreamProcessor _processor;
     private readonly IOnnxModelEvaluator _modelEvaluator;
-    private readonly IBroadcastService _broadcastService;
+    private readonly SignalBroadcastChannelManager _broadcastChannel;
     private readonly ProcessingOptions _options;
     private readonly ILogger<CsiProcessingBackgroundService> _logger;
 
@@ -38,34 +43,35 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
 
     public CsiProcessingBackgroundService(
         CsiDataChannelManager channelManager,
-        ISignalProcessor signalProcessor,
+        ICsiStreamProcessor processor,
         IOnnxModelEvaluator modelEvaluator,
-        IBroadcastService broadcastService,
+        SignalBroadcastChannelManager broadcastChannel,
         IOptions<ProcessingOptions> options,
         ILogger<CsiProcessingBackgroundService> logger)
     {
         _channelManager = channelManager;
-        _signalProcessor = signalProcessor;
+        _processor = processor;
         _modelEvaluator = modelEvaluator;
-        _broadcastService = broadcastService;
+        _broadcastChannel = broadcastChannel;
         _options = options.Value;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        int windowSize = Math.Max(1, _options.WindowSize);
+        int slideStep = _options.SlideStep > 0 ? Math.Min(_options.SlideStep, windowSize) : windowSize;
+
         _logger.LogInformation(
             "CSI Processing pipeline started. WindowSize={WindowSize}, SlideStep={SlideStep}, " +
             "LowPass={CutoffHz} Hz, SampleRate={SampleRate} Hz.",
-            _options.WindowSize, _options.SlideStep,
-            _options.LowPassCutoffHz, _options.SamplingRateHz);
+            windowSize, slideStep, _options.LowPassCutoffHz, _options.SamplingRateHz);
 
-        // ── Sliding window buffer ──
-        // Pre-allocate the full window. We fill it from index 0..WindowSize-1,
-        // then after processing, shift the last (WindowSize - SlideStep) frames
-        // to the front and refill the remaining SlideStep slots.
-        var windowBuffer = new CsiData[_options.WindowSize];
-        int fillIndex = 0; // Next position to write in the buffer
+        // Per-stream state, lazily built once the first frame reveals the subcarrier count.
+        CsiRingBuffer? ring = null;
+        float[] frameBuf = [];           // reused per frame — NOT pooled
+        int currentSc = 0;
+        int framesSinceWindow = 0;
 
         try
         {
@@ -73,90 +79,98 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
             {
                 Interlocked.Increment(ref _framesConsumed);
 
-                // ── Accumulate frame into the window buffer ──
-                windowBuffer[fillIndex] = csiData;
-                fillIndex++;
+                int rawLen = Math.Min(csiData.RawDataLength, csiData.RawCsiData.Length);
+                if (rawLen < 2)
+                    continue;
+                int sc = rawLen / 2;
 
-                // ── Check if the window is full ──
-                if (fillIndex < _options.WindowSize)
+                // (Re)build per-stream buffers on the first frame or a width change.
+                if (ring is null || sc != currentSc)
+                {
+                    if (ring is not null)
+                        _logger.LogWarning(
+                            "Subcarrier count changed {Old} -> {New}; restarting window accumulation.",
+                            currentSc, sc);
+
+                    currentSc = sc;
+                    frameBuf = new float[sc];
+                    ring = new CsiRingBuffer(sc, CsiRingBuffer.NextPowerOfTwo(windowSize));
+                    framesSinceWindow = 0;
+                }
+
+                // Filter this frame exactly once; append to the ring.
+                int n = _processor.ProcessFrame(csiData, frameBuf);
+                if (n == 0)
                     continue;
 
+                ring.Write(frameBuf.AsSpan(0, n));
+                framesSinceWindow++;
+
+                // Emit a window only once it is full AND a slide step has elapsed.
+                if (ring.Written < windowSize || framesSinceWindow < slideStep)
+                    continue;
+
+                framesSinceWindow = 0;
                 Interlocked.Increment(ref _windowsProcessed);
 
+                int flatLen = n * windowSize;
+                float[] snapshot = ArrayPool<float>.Shared.Rent(flatLen);
                 try
                 {
-                    // ── Process the full window ──
-                    var windowSpan = new ReadOnlySpan<CsiData>(windowBuffer, 0, _options.WindowSize);
-                    var filteredSignal = _signalProcessor.ProcessWindow(windowSpan);
+                    // Subcarrier-major window snapshot (model input layout).
+                    ring.SnapshotSubcarrierMajor(windowSize, snapshot.AsSpan(0, flatLen));
 
-                    if (filteredSignal.Length > 0)
-                    {
-                        // ── Broadcast filtered data via SignalR ──
-                        // We send the latest frame (most recent timestamp) along with
-                        // its now-populated SubcarrierAmplitudes for visualization.
-                        // ONNX için 6400 elemanlı (flattened) matrisimiz var. 
-                        // Sadece SignalR (Grafik) için son anı (t = 99) cımbızlıyoruz:
-                        int subcarrierCount = filteredSignal.Length / _options.WindowSize;
-                        var latestAmplitudes = new float[subcarrierCount];
+                    // ── Broadcast the latest filtered frame (non-blocking, loss-tolerant) ──
+                    EnqueueBroadcast(csiData, frameBuf, n);
 
-                        for (int sc = 0; sc < subcarrierCount; sc++)
-                        {
-                            // Matristeki her alt taşıyıcının son zaman indeksini (WindowSize - 1) çekiyoruz
-                            int offset = sc * _options.WindowSize;
-                            latestAmplitudes[sc] = filteredSignal[offset + (_options.WindowSize - 1)];
-                        }
-
-                        var latestFrame = windowBuffer[_options.WindowSize - 1];
-                        // 6400 elemanlı diziyi değil, sadece güncel 64 elemanlı diziyi ön yüze veriyoruz
-                        latestFrame.SubcarrierAmplitudes = latestAmplitudes;
-                        latestFrame.SubcarrierCount = subcarrierCount;
-
-                        await _broadcastService.BroadcastCsiDataAsync(latestFrame, stoppingToken);
-
-                        // ── ONNX Inference (Step 4 — skipped for now) ──
-                        // TODO: Uncomment when the ONNX model is available.
-                        // var inferenceResult = _modelEvaluator.Predict(filteredSignal);
-                        // await _broadcastService.BroadcastInferenceResultAsync(inferenceResult, stoppingToken);
-                        //
-                        // // Check for automation trigger (e.g., LyingOnCouch for 3+ consecutive windows)
-                        // if (inferenceResult.Confidence >= confidenceThreshold)
-                        //     await _broadcastService.TriggerAutomationAsync(inferenceResult.PredictedLabel, stoppingToken);
-                    }
+                    // ── ONNX Inference (Step 4 — disabled until the model is available) ──
+                    // The pooled snapshot is the model input and MUST be consumed
+                    // before the finally below returns it to the pool.
+                    // var inferenceResult = _modelEvaluator.Predict(snapshot.AsSpan(0, flatLen));
+                    // (route the result + automation through the broadcast pump / debounce — Phase 4)
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     _logger.LogError(ex, "Error processing window #{WindowNumber}.",
                         Interlocked.Read(ref _windowsProcessed));
-                    // Continue processing — don't let one bad window kill the pipeline
+                    // Continue — one bad window must not kill the pipeline.
                 }
-
-                // ── Slide the window forward ──
-                // Keep the last (WindowSize - SlideStep) frames and shift them to the front.
-                int keepCount = _options.WindowSize - _options.SlideStep;
-                if (keepCount > 0)
+                finally
                 {
-                    Array.Copy(windowBuffer, _options.SlideStep, windowBuffer, 0, keepCount);
-                    // Clear the freed slots to allow GC of old CsiData references
-                    Array.Clear(windowBuffer, keepCount, _options.SlideStep);
+                    ArrayPool<float>.Shared.Return(snapshot);
                 }
-                else
-                {
-                    // SlideStep >= WindowSize: non-overlapping windows, clear everything
-                    Array.Clear(windowBuffer, 0, _options.WindowSize);
-                }
-
-                fillIndex = keepCount > 0 ? keepCount : 0;
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            // Expected during graceful shutdown
+            // Expected during graceful shutdown.
         }
 
         _logger.LogInformation(
-            "CSI Processing pipeline stopped. " +
-            "Frames consumed: {Frames}, Windows processed: {Windows}.",
+            "CSI Processing pipeline stopped. Frames consumed: {Frames}, Windows processed: {Windows}.",
             Interlocked.Read(ref _framesConsumed),
             Interlocked.Read(ref _windowsProcessed));
+    }
+
+    /// <summary>
+    /// Copies the latest filtered amplitudes into a fresh DTO and enqueues it on
+    /// the loss-tolerant broadcast channel. Runs at most once per SlideStep
+    /// (~1–2 Hz), so this small allocation is off the hot path. Never awaits the
+    /// network; a full channel simply drops the oldest pending frame.
+    /// </summary>
+    private void EnqueueBroadcast(CsiData latest, float[] frameBuf, int subcarrierCount)
+    {
+        var amplitudes = new float[subcarrierCount];
+        Array.Copy(frameBuf, amplitudes, subcarrierCount);
+
+        var dto = new CsiSignalDto
+        {
+            TimestampMs = latest.TimestampTicks / TimeSpan.TicksPerMillisecond,
+            Rssi = latest.Rssi,
+            SubcarrierCount = subcarrierCount,
+            Amplitudes = amplitudes
+        };
+
+        _broadcastChannel.Writer.TryWrite(dto);
     }
 }

@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="CsiRadar.Backend.Tests/CsiRadar.Backend.Tests.csproj" />
+  <Project Path="CsiRadar.Backend/CsiRadar.Backend.csproj" />
+</Solution>

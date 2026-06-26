@@ -36,6 +36,10 @@ builder.Services.Configure<InferenceOptions>(
 // BoundedChannel with DropOldest backpressure (1024 frames ≈ 10 sec at 100 Hz).
 builder.Services.AddSingleton<CsiDataChannelManager>();
 
+// Loss-tolerant broadcast channel (depth 2, DropOldest) that decouples SignalR
+// transport from the inference-critical consumer — a slow client cannot stall ingestion.
+builder.Services.AddSingleton<SignalBroadcastChannelManager>();
+
 // ──────────────────────────────────────────────────────
 // 3. CORE SERVICES — Interface-based DI (loose coupling)
 // ──────────────────────────────────────────────────────
@@ -44,8 +48,9 @@ builder.Services.AddSingleton<CsiDataChannelManager>();
 // Registered as singleton — shared between the listener (producer) and broadcast (publisher).
 builder.Services.AddSingleton<IMqttClientService, MqttClientService>();
 
-// Signal Processor: Baseline subtraction + Butterworth filtering (Math.NET).
-builder.Services.AddSingleton<ISignalProcessor, SignalFilteringService>();
+// Signal Processor: per-frame demod + baseline subtraction + Butterworth IIR filtering
+// (own zero-allocation biquad cascade; filters each frame exactly once).
+builder.Services.AddSingleton<ICsiStreamProcessor, CsiStreamProcessor>();
 
 // ONNX Model Evaluator: Thread-safe inference via PredictionEnginePool.
 builder.Services.AddSingleton<IOnnxModelEvaluator, OnnxModelEvaluator>();
@@ -103,8 +108,11 @@ builder.Services.AddSignalR(options =>
 builder.Services.AddHostedService<MqttListenerBackgroundService>();
 
 // Consumer: Processing pipeline that reads from the channel,
-// filters signals, runs inference, and broadcasts results.
+// filters signals, runs inference, and enqueues graph frames for broadcast.
 builder.Services.AddHostedService<CsiProcessingBackgroundService>();
+
+// Broadcast pump: drains the broadcast channel to SignalR off the consumer thread.
+builder.Services.AddHostedService<BroadcastBackgroundService>();
 
 // ──────────────────────────────────────────────────────
 // 7. LOGGING — Structured logging configuration

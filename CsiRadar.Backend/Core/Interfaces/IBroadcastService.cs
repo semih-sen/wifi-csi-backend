@@ -3,19 +3,17 @@ using CsiRadar.Backend.Core.Entities;
 namespace CsiRadar.Backend.Core.Interfaces;
 
 /// <summary>
-/// Abstraction for the real-time broadcasting service.
-/// Pushes processed CSI data and inference results to connected clients
-/// via SignalR (WebSocket) and triggers Home Assistant automations
-/// via MQTT publishing.
+/// Abstraction for inference/automation broadcasting.
+/// Pushes inference results to connected clients via SignalR (WebSocket) and
+/// triggers Home Assistant automations via MQTT publishing.
+///
+/// High-frequency CSI graph frames do NOT go through this interface — they are
+/// enqueued onto a loss-tolerant broadcast channel and drained to SignalR by a
+/// dedicated pump (<c>BroadcastBackgroundService</c>), so a slow client can never
+/// back-pressure the inference-critical consumer loop.
 /// </summary>
 public interface IBroadcastService
 {
-    /// <summary>
-    /// Broadcasts processed CSI signal data to all connected SignalR clients.
-    /// Used for real-time graph visualization on the frontend.
-    /// </summary>
-    Task BroadcastCsiDataAsync(CsiData data, CancellationToken cancellationToken);
-
     /// <summary>
     /// Broadcasts an inference result to all connected SignalR clients.
     /// </summary>

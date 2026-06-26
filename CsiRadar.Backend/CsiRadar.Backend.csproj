@@ -10,12 +10,16 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="MathNet.Filtering" Version="0.7.0" />
-    <PackageReference Include="MathNet.Numerics" Version="5.0.0" />
+    <!-- MathNet.Filtering/Numerics removed: the IIR low-pass is now an in-house
+         zero-allocation Butterworth biquad cascade (see CsiStreamProcessor). -->
     <PackageReference Include="Microsoft.Extensions.ML" Version="5.0.0" />
     <PackageReference Include="Microsoft.ML" Version="5.0.0" />
     <PackageReference Include="Microsoft.ML.OnnxTransformer" Version="5.0.0" />
     <PackageReference Include="MQTTnet" Version="5.0.1.1416" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="CsiRadar.Backend.Tests" />
   </ItemGroup>
 
 </Project>

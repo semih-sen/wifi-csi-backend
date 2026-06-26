@@ -11,11 +11,13 @@ using Microsoft.Extensions.Options;
 namespace CsiRadar.Backend.Infrastructure.Broadcasting;
 
 /// <summary>
-/// Implements <see cref="IBroadcastService"/> using SignalR for real-time
-/// frontend streaming and MQTT for Home Assistant automation triggers.
+/// Implements <see cref="IBroadcastService"/> using SignalR for inference-result
+/// streaming and MQTT for Home Assistant automation triggers.
 ///
-/// SignalR client methods:
-///   - "ReceiveCsiData": Receives processed CSI data for graph visualization
+/// High-frequency CSI graph frames are handled separately by
+/// <see cref="BroadcastBackgroundService"/> (channel-drained), not here.
+///
+/// SignalR client methods emitted here:
 ///   - "ReceiveInference": Receives ONNX inference results (predicted labels)
 ///   - "ReceiveStatus": Receives confirmed status changes
 ///
@@ -43,25 +45,6 @@ public sealed class BroadcastService : IBroadcastService
         _mqttClient = mqttClient;
         _mqttOptions = mqttOptions.Value;
         _logger = logger;
-    }
-
-    /// <inheritdoc />
-    public async Task BroadcastCsiDataAsync(CsiData data, CancellationToken cancellationToken)
-    {
-        // Build a lightweight DTO for the frontend.
-        // We don't send the raw I/Q data — only the processed amplitudes and metadata.
-        var payload = new CsiSignalDto
-        {
-            TimestampMs = data.TimestampTicks / TimeSpan.TicksPerMillisecond,
-            Rssi = data.Rssi,
-            SubcarrierCount = data.SubcarrierCount,
-            Amplitudes = data.SubcarrierAmplitudes
-        };
-
-        await _hubContext.Clients.All.SendAsync(
-            "ReceiveCsiData",
-            payload,
-            cancellationToken);
     }
 
     /// <inheritdoc />
@@ -118,24 +101,6 @@ public sealed class BroadcastService : IBroadcastService
     // ═══════════════════════════════════════════════════════════════
     //  DTOs for SignalR serialization (lightweight, frontend-facing)
     // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Lightweight DTO sent to SignalR clients for CSI graph visualization.
-    /// </summary>
-    private sealed class CsiSignalDto
-    {
-        [JsonPropertyName("timestampMs")]
-        public long TimestampMs { get; set; }
-
-        [JsonPropertyName("rssi")]
-        public int Rssi { get; set; }
-
-        [JsonPropertyName("subcarrierCount")]
-        public int SubcarrierCount { get; set; }
-
-        [JsonPropertyName("amplitudes")]
-        public float[] Amplitudes { get; set; } = [];
-    }
 
     /// <summary>
     /// Lightweight DTO sent to SignalR clients for inference results.
