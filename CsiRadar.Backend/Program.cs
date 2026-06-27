@@ -41,6 +41,10 @@ builder.Services.AddSingleton<CsiDataChannelManager>();
 // transport from the inference-critical consumer — a slow client cannot stall ingestion.
 builder.Services.AddSingleton<SignalBroadcastChannelManager>();
 
+// Inference broadcast channel (depth 64, DropOldest): carries per-window inference
+// results + confirmed statuses to the inference pump, off the consumer thread.
+builder.Services.AddSingleton<InferenceBroadcastChannelManager>();
+
 // ──────────────────────────────────────────────────────
 // 3. CORE SERVICES — Interface-based DI (loose coupling)
 // ──────────────────────────────────────────────────────
@@ -53,8 +57,16 @@ builder.Services.AddSingleton<IMqttClientService, MqttClientService>();
 // (own zero-allocation biquad cascade; filters each frame exactly once).
 builder.Services.AddSingleton<ICsiStreamProcessor, CsiStreamProcessor>();
 
-// ONNX Model Evaluator: Thread-safe inference via PredictionEnginePool.
+// Calibration coordinator: thread-safe hand-off for empty-room baseline requests
+// (the consumer captures the frames and calls UpdateBaseline on its own thread).
+builder.Services.AddSingleton<CalibrationCoordinator>();
+
+// ONNX Model Evaluator: loads model.onnx + labels.json and runs inference.
 builder.Services.AddSingleton<IOnnxModelEvaluator, OnnxModelEvaluator>();
+
+// Inference debounce state machine (consumer-thread-only): confirms a label after
+// N consecutive windows above the confidence threshold before automation fires.
+builder.Services.AddSingleton<InferenceDebouncer>();
 
 // Broadcast Service: SignalR push + MQTT automation publishing.
 builder.Services.AddSingleton<IBroadcastService, BroadcastService>();
@@ -64,18 +76,14 @@ builder.Services.AddSingleton<RecordingService>();
 builder.Services.AddSingleton<IRecordingService>(sp => sp.GetRequiredService<RecordingService>());
 
 // ──────────────────────────────────────────────────────
-// 4. ML.NET — PredictionEnginePool for thread-safe ONNX inference
+// 4. ML.NET — ONNX inference (Seam A)
 // ──────────────────────────────────────────────────────
-// TODO: Uncomment and configure when the ONNX model file is available (Step 3).
-// var inferenceOptions = builder.Configuration
-//     .GetSection(InferenceOptions.SectionName)
-//     .Get<InferenceOptions>()!;
-//
-// builder.Services.AddPredictionEnginePool<OnnxInput, OnnxOutput>()
-//     .FromOnnxModel(
-//         modelFilePath: inferenceOptions.ModelPath,
-//         inputColumnName: "input",
-//         outputColumnName: "output");
+// OnnxModelEvaluator (registered above) loads model.onnx + labels.json from the
+// configured Inference paths, builds an ML.NET ONNX transformer, and validates the
+// label map against the model's output dimension at startup. If the model file is
+// absent it stays inactive and the pipeline runs the graph/recording path only.
+// No PredictionEnginePool is needed: only the single consumer thread predicts, and
+// the evaluator guards its PredictionEngine with a lock.
 
 builder.Services.AddCors(options =>
 {
@@ -118,6 +126,9 @@ builder.Services.AddHostedService<CsiProcessingBackgroundService>();
 
 // Broadcast pump: drains the broadcast channel to SignalR off the consumer thread.
 builder.Services.AddHostedService<BroadcastBackgroundService>();
+
+// Inference pump: drains inference results to SignalR + triggers MQTT automation.
+builder.Services.AddHostedService<InferenceBroadcastBackgroundService>();
 // Disk yazıcı işçi (Kayıt kanalını boşaltan motor)
 builder.Services.AddHostedService<RecordingBackgroundService>();
 
@@ -137,6 +148,33 @@ app.UseCors("AllowAll");
 
 // Map the SignalR hub endpoint
 app.MapHub<RadarHub>("/hubs/radar");
+
+// ── Diagnostics: a single health/observability endpoint (Phase 4) ──
+// Surfaces model + calibration + recorder state and the live processing config so
+// drift and "why is nothing classifying?" are answerable without attaching a debugger.
+app.MapGet("/health", (
+    IOnnxModelEvaluator evaluator,
+    ICsiStreamProcessor processor,
+    IRecordingService recording,
+    Microsoft.Extensions.Options.IOptions<ProcessingOptions> processing) =>
+{
+    var p = processing.Value;
+    return Results.Ok(new
+    {
+        status = "ok",
+        contractVersion = CsiRadar.Backend.Infrastructure.SignalR.ContractInfo.Version,
+        model = new { loaded = evaluator.IsReady, classes = evaluator.Labels },
+        processing = new
+        {
+            p.WindowSize,
+            p.SlideStep,
+            p.SamplingRateHz,
+            subcarriers = processor.SubcarrierCount,
+            calibrated = processor.IsCalibrated,
+        },
+        recording = recording.Status,
+    });
+});
 
 app.Logger.LogInformation("CsiRadar Backend starting...");
 app.Logger.LogInformation("SignalR Hub mapped at /hubs/radar");

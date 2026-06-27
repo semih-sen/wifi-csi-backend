@@ -12,14 +12,22 @@
   <ItemGroup>
     <!-- MathNet.Filtering/Numerics removed: the IIR low-pass is now an in-house
          zero-allocation Butterworth biquad cascade (see CsiStreamProcessor). -->
-    <PackageReference Include="Microsoft.Extensions.ML" Version="5.0.0" />
-    <PackageReference Include="Microsoft.ML" Version="5.0.0" />
-    <PackageReference Include="Microsoft.ML.OnnxTransformer" Version="5.0.0" />
+    <!-- ONNX inference runs directly on onnxruntime's InferenceSession (Seam A):
+         deterministic disposal and a thread-safe Run, without the ML.NET
+         PredictionEngine layer (which had a native teardown crash on this stack). -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.23.2" />
     <PackageReference Include="MQTTnet" Version="5.0.1.1416" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="CsiRadar.Backend.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ship the ONNX model + label map next to the binary so the configured
+         relative paths resolve at runtime (Seam A). -->
+    <None Update="Models\model.onnx" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Models\labels.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -79,9 +79,14 @@ public sealed class BroadcastService : IBroadcastService
             status, _mqttOptions.AutomationTopic);
 
         // ── Notify SignalR clients of the confirmed status change ──
+        // Typed, camelCase DTO — no PascalCase exception on the wire (Seam B.1).
         await _hubContext.Clients.All.SendAsync(
             "ReceiveStatus",
-            new { Status = status, Timestamp = DateTimeOffset.UtcNow },
+            new StatusChangedDto
+            {
+                Status = status,
+                TimestampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            },
             cancellationToken);
 
         // ── Publish to MQTT for Home Assistant ──

@@ -1,6 +1,10 @@
+using CsiRadar.Backend.Application.MachineLearning;
+using CsiRadar.Backend.Application.Processing;
+using CsiRadar.Backend.Core.Configuration;
 using CsiRadar.Backend.Core.Entities;
 using CsiRadar.Backend.Core.Interfaces;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Options;
 
 namespace CsiRadar.Backend.Infrastructure.SignalR;
 
@@ -19,12 +23,39 @@ public sealed class RadarHub : Hub
 {
 
     private readonly IRecordingService _recording;
- 
-    public RadarHub(IRecordingService recording)
+    private readonly IOnnxModelEvaluator _evaluator;
+    private readonly CalibrationCoordinator _calibration;
+    private readonly ProcessingOptions _processing;
+
+    public RadarHub(
+        IRecordingService recording,
+        IOnnxModelEvaluator evaluator,
+        CalibrationCoordinator calibration,
+        IOptions<ProcessingOptions> processing)
     {
         _recording = recording;
+        _evaluator = evaluator;
+        _calibration = calibration;
+        _processing = processing.Value;
     }
- 
+
+    /// <summary>
+    /// Contract handshake (Seam B.3). The frontend calls this on connect to read the
+    /// contract version and live processing parameters, then self-configures the
+    /// graph/inference panels and surfaces any version mismatch — instead of
+    /// hardcoding 64/100 and guessing.
+    /// </summary>
+    public ServerInfoDto GetServerInfo() => new()
+    {
+        ContractVersion = ContractInfo.Version,
+        WindowSize = _processing.WindowSize,
+        SlideStep = _processing.SlideStep,
+        SampleRateHz = _processing.SamplingRateHz,
+        SubcarrierCount = OnnxInput.Subcarriers,
+        ModelLoaded = _evaluator.IsReady,
+        Classes = _evaluator.Labels,
+    };
+
     public override async Task OnConnectedAsync()
     {
         // Bring a freshly-connected client in sync with the current recorder state.
@@ -66,6 +97,19 @@ public sealed class RadarHub : Hub
  
     /// <summary>Returns the current recorder status without changing it.</summary>
     public RecordingStatus GetRecordingStatus() => _recording.Status;
+
+    /// <summary>
+    /// Requests an empty-room baseline calibration (Phase 4). The processing consumer
+    /// captures the next <paramref name="frames"/> frames and recomputes the baseline.
+    /// Call this only when the room is known to be empty.
+    /// </summary>
+    public string Calibrate(int frames = CalibrationCoordinator.DefaultFrames)
+    {
+        if (frames < 1)
+            frames = CalibrationCoordinator.DefaultFrames;
+        _calibration.Request(frames);
+        return $"Baseline calibration requested for the next {frames} frames.";
+    }
 
 
     /// <summary>

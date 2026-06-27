@@ -3,4 +3,5 @@ CsiRadar.Backend/obj/
 CsiRadar.Backend.Tests/bin/
 CsiRadar.Backend.Tests/obj/
 CsiRadar.Backend/Recordings/
+CsiRadar.Backend/Models/*.onnx
 .vs/
