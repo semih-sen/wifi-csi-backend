@@ -77,12 +77,12 @@ public sealed class RadarHub : Hub
     /// caller and broadcasts the new state to every connected client so multiple
     /// frontends stay in sync.
     /// </summary>
-    public async Task<RecordingStatus> StartRecording(string label)
+    public async Task<RecordingStatus> StartRecording(string label, string? subject = null)
     {
         if (string.IsNullOrWhiteSpace(label))
             label = "unlabeled";
- 
-        RecordingStatus status = _recording.Start(label.Trim());
+
+        RecordingStatus status = _recording.Start(label.Trim(), (subject ?? string.Empty).Trim());
         await Clients.All.SendAsync("RecordingState", status);
         return status;
     }

@@ -16,10 +16,11 @@ public class RecordingFileWriterTests
 {
     private static readonly byte[] Magic = "CSI1"u8.ToArray();
 
-    private static RecordingSessionInfo Info(string label, bool captureRaw, long startMs = 1_700_000_000_000) => new()
+    private static RecordingSessionInfo Info(string label, bool captureRaw, long startMs = 1_700_000_000_000, string subject = "") => new()
     {
         SessionId = 7,
         Label = label,
+        Subject = subject,
         SampleRateHz = 100.0,
         LowPassCutoffHz = 20.0,
         FilterOrder = 4,
@@ -62,12 +63,14 @@ public class RecordingFileWriterTests
             int off = 0;
 
             Assert.Equal(Magic, bytes[..4]); off += 4;
-            Assert.Equal(1, ReadI32(bytes, ref off));          // version
+            Assert.Equal(2, ReadI32(bytes, ref off));          // version (v2)
             Assert.Equal(4, ReadI32(bytes, ref off));          // subcarrierCount
             Assert.Equal(100.0, ReadF64(bytes, ref off));      // sampleRateHz
             Assert.Equal(0, bytes[off]); off += 1;             // captureRaw flag
             int labelLen = ReadI32(bytes, ref off);
             Assert.Equal("Walking", Encoding.UTF8.GetString(bytes, off, labelLen)); off += labelLen;
+            int subjectLen = ReadI32(bytes, ref off);          // v2: subject (empty here)
+            Assert.Equal(0, subjectLen); off += subjectLen;
             Assert.Equal(7L, ReadI64(bytes, ref off));         // sessionId
             Assert.Equal(info.StartedAtUnixMs, ReadI64(bytes, ref off));
 
@@ -103,7 +106,8 @@ public class RecordingFileWriterTests
             string binPath = Path.Combine(dir, $"{info.SessionId:D6}_Empty_{info.StartedAtUnixMs}.csibin");
             byte[] bytes = File.ReadAllBytes(binPath);
             int off = 4 + 4 + 4 + 8 + 1;                       // skip to labelLen
-            int labelLen = ReadI32(bytes, ref off); off += labelLen + 8 + 8;
+            int labelLen = ReadI32(bytes, ref off); off += labelLen;
+            int subjectLen = ReadI32(bytes, ref off); off += subjectLen + 8 + 8; // subject + sessionId + startedAt
 
             Assert.Equal(42L, ReadI64(bytes, ref off));        // timestampMs
             Assert.Equal(-50, ReadI32(bytes, ref off));        // rssi
@@ -115,6 +119,40 @@ public class RecordingFileWriterTests
         }
         finally { //Directory.Delete(dir, recursive: true); 
         }
+    }
+
+    [Fact]
+    public void Subject_RoundTripsInHeaderAndManifest()
+    {
+        string dir = NewTempDir();
+        try
+        {
+            var info = Info("Walking", captureRaw: false, subject: "Alice");
+            using (var w = new CsiRecordingFileWriter(dir, info, flushEveryNFrames: 1))
+            {
+                w.WriteFrame([1f, 2f, 3f, 4f], ReadOnlySpan<sbyte>.Empty, 1000, -40);
+                w.CloseSession(interrupted: false, droppedFrames: 0);
+            }
+
+            // Filename folds in the subject for human-friendly gait datasets.
+            string stem = $"{info.SessionId:D6}_Walking_Alice_{info.StartedAtUnixMs}";
+            byte[] bytes = File.ReadAllBytes(Path.Combine(dir, stem + ".csibin"));
+
+            int off = 4;
+            Assert.Equal(2, ReadI32(bytes, ref off));          // version (v2)
+            off += 4 + 8 + 1;                                  // subcarrierCount + sampleRateHz + captureRaw
+            int labelLen = ReadI32(bytes, ref off);
+            Assert.Equal("Walking", Encoding.UTF8.GetString(bytes, off, labelLen)); off += labelLen;
+            int subjectLen = ReadI32(bytes, ref off);
+            Assert.Equal("Alice", Encoding.UTF8.GetString(bytes, off, subjectLen)); off += subjectLen;
+            Assert.Equal(7L, ReadI64(bytes, ref off));         // sessionId follows subject
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, stem + ".json")));
+            var root = doc.RootElement;
+            Assert.Equal("Alice", root.GetProperty("subject").GetString());
+            Assert.Equal("csibin-v2", root.GetProperty("format").GetString());
+        }
+        finally { Directory.Delete(dir, recursive: true); }
     }
 
     [Fact]

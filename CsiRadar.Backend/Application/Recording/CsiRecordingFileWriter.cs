@@ -14,12 +14,14 @@ namespace CsiRadar.Backend.Application.Recording;
 ///
 ///   HEADER (once):
 ///     magic            : 4  bytes  = "CSI1"
-///     formatVersion    : int32
+///     formatVersion    : int32    (== 2)
 ///     subcarrierCount  : int32
 ///     sampleRateHz     : float64
 ///     captureRaw       : uint8    (0/1)
 ///     labelLength      : int32
 ///     label            : labelLength UTF-8 bytes
+///     subjectLength    : int32    (v2+) — who performed the activity
+///     subject          : subjectLength UTF-8 bytes (v2+)
 ///     sessionId        : int64
 ///     startedAtUnixMs  : int64
 ///
@@ -40,7 +42,8 @@ namespace CsiRadar.Backend.Application.Recording;
 internal sealed class CsiRecordingFileWriter : IDisposable
 {
     private static readonly byte[] Magic = "CSI1"u8.ToArray();
-    private const int FormatVersion = 1;
+    // v2 adds the subject (who performed the activity) to the header, after the label.
+    private const int FormatVersion = 2;
 
     private static readonly JsonSerializerOptions ManifestJsonOptions = new()
     {
@@ -128,6 +131,10 @@ internal sealed class CsiRecordingFileWriter : IDisposable
         _writer.Write(label.Length);          // int32
         _writer.Write(label);                 // raw bytes
 
+        byte[] subject = Encoding.UTF8.GetBytes(_info.Subject);
+        _writer.Write(subject.Length);        // int32 (v2+)
+        _writer.Write(subject);               // raw bytes (v2+)
+
         _writer.Write(_info.SessionId);       // int64
         _writer.Write(_info.StartedAtUnixMs); // int64
     }
@@ -146,8 +153,9 @@ internal sealed class CsiRecordingFileWriter : IDisposable
         {
             SessionId = _info.SessionId,
             Label = _info.Label,
+            Subject = _info.Subject,
             BinaryFile = Path.GetFileName(_binPath),
-            Format = "csibin-v1",
+            Format = "csibin-v2",
             SubcarrierCount = _subcarrierCount,
             FrameCount = _frameCount,
             DroppedFrames = droppedFrames,
@@ -174,23 +182,33 @@ internal sealed class CsiRecordingFileWriter : IDisposable
     }
 
     /// <summary>
-    /// Builds a collision-free, path-traversal-safe file stem. The label is
-    /// sanitized to <c>[A-Za-z0-9_-]</c> (so a malicious label can neither escape
+    /// Builds a collision-free, path-traversal-safe file stem. The label and subject
+    /// are sanitized to <c>[A-Za-z0-9_-]</c> (so a malicious value can neither escape
     /// the output directory nor inject path separators); session id and start time
-    /// guarantee uniqueness regardless.
+    /// guarantee uniqueness regardless. The subject segment is included only when
+    /// present, so subject-less recordings keep the original
+    /// <c>{id}_{label}_{started}</c> stem.
     /// </summary>
     private static string BuildStem(RecordingSessionInfo info)
     {
-        ReadOnlySpan<char> label = info.Label;
-        var sb = new StringBuilder(label.Length);
-        foreach (char c in label)
+        string label = Sanitize(info.Label, fallback: "unlabeled");
+        string subject = Sanitize(info.Subject, fallback: "");
+
+        string who = subject.Length == 0 ? "" : $"_{subject}";
+        return $"{info.SessionId:D6}_{label}{who}_{info.StartedAtUnixMs}";
+    }
+
+    /// <summary>Sanitizes a label/subject to <c>[A-Za-z0-9_-]</c>, capped at 48 chars.</summary>
+    private static string Sanitize(string value, string fallback)
+    {
+        var sb = new StringBuilder(value.Length);
+        foreach (char c in value)
             sb.Append(char.IsAsciiLetterOrDigit(c) || c is '_' or '-' ? c : '_');
 
         string safe = sb.ToString();
-        if (safe.Length == 0) safe = "unlabeled";
+        if (safe.Length == 0) return fallback;
         if (safe.Length > 48) safe = safe[..48];
-
-        return $"{info.SessionId:D6}_{safe}_{info.StartedAtUnixMs}";
+        return safe;
     }
 }
 
@@ -204,6 +222,7 @@ internal sealed class RecordingManifest
 {
     public long SessionId { get; init; }
     public string Label { get; init; } = string.Empty;
+    public string Subject { get; init; } = string.Empty;
     public string BinaryFile { get; init; } = string.Empty;
     public string Format { get; init; } = string.Empty;
 

@@ -139,6 +139,9 @@ builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 builder.Logging.AddDebug();
 
+builder.WebHost.UseUrls("http://0.0.0.0:5000");
+
+
 // ──────────────────────────────────────────────────────
 // BUILD & RUN
 // ──────────────────────────────────────────────────────

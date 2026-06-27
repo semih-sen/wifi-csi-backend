@@ -87,7 +87,7 @@ public sealed class RecordingService : IRecordingService
     }
 
     /// <inheritdoc />
-    public RecordingStatus Start(string label)
+    public RecordingStatus Start(string label, string subject = "")
     {
         lock (_gate)
         {
@@ -104,6 +104,7 @@ public sealed class RecordingService : IRecordingService
             {
                 SessionId = id,
                 Label = label,
+                Subject = subject ?? string.Empty,
                 SampleRateHz = _processing.SamplingRateHz,
                 LowPassCutoffHz = _processing.LowPassCutoffHz,
                 FilterOrder = _processing.FilterOrder,
@@ -132,8 +133,8 @@ public sealed class RecordingService : IRecordingService
 
             _active = session; // volatile publish
             _logger.LogInformation(
-                "Recording started: session {Id}, label '{Label}', baselineApplied={Baseline}.",
-                id, label, info.BaselineApplied);
+                "Recording started: session {Id}, label '{Label}', subject '{Subject}', baselineApplied={Baseline}.",
+                id, label, info.Subject, info.BaselineApplied);
             return Snapshot(session);
         }
     }
@@ -220,6 +221,7 @@ public sealed class RecordingService : IRecordingService
         IsRecording = true,
         SessionId = s.Id,
         Label = s.Info.Label,
+        Subject = s.Info.Subject,
         FramesCaptured = Interlocked.Read(ref s.Captured),
         FramesDropped = Interlocked.Read(ref s.Dropped),
         StartedAtUnixMs = s.Info.StartedAtUnixMs,

@@ -17,6 +17,13 @@ public sealed record RecordingStatus
     [JsonPropertyName("label")]
     public string Label { get; init; } = string.Empty;
 
+    /// <summary>
+    /// Who performed the activity (e.g. the person walking). Empty when not
+    /// applicable (e.g. EmptyRoom). Enables person/gait recognition downstream.
+    /// </summary>
+    [JsonPropertyName("subject")]
+    public string Subject { get; init; } = string.Empty;
+
     [JsonPropertyName("framesCaptured")]
     public long FramesCaptured { get; init; }
 
@@ -41,6 +48,13 @@ public sealed class RecordingSessionInfo
 {
     public long SessionId { get; init; }
     public string Label { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Who performed the activity (the person walking, etc.). Empty when not
+    /// applicable. Persisted into the binary header and the JSON manifest so the
+    /// model team can train person/gait recognition, not just activity.
+    /// </summary>
+    public string Subject { get; init; } = string.Empty;
 
     public double SampleRateHz { get; init; }
     public double LowPassCutoffHz { get; init; }

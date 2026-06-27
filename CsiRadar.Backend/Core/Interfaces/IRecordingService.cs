@@ -25,7 +25,12 @@ public interface IRecordingService
     /// Begins a new labelled session. If a session is already active the call is
     /// ignored (the current status is returned). Returns the resulting status.
     /// </summary>
-    RecordingStatus Start(string label);
+    /// <param name="label">The activity label (e.g. Walking).</param>
+    /// <param name="subject">
+    /// Who performed it (e.g. the person walking); empty when not applicable.
+    /// Captured for person/gait recognition.
+    /// </param>
+    RecordingStatus Start(string label, string subject = "");
 
     /// <summary>
     /// Finalizes the active session (the writer flushes, closes the payload file

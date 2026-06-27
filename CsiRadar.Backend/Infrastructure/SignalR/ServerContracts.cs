@@ -10,7 +10,8 @@ namespace CsiRadar.Backend.Infrastructure.SignalR;
 /// </summary>
 public static class ContractInfo
 {
-    public const string Version = "1.0";
+    // 1.1: RecordingStatus gained `subject`; StartRecording gained a subject arg.
+    public const string Version = "1.1";
 }
 
 /// <summary>
