@@ -30,7 +30,11 @@ public interface IRecordingService
     /// Who performed it (e.g. the person walking); empty when not applicable.
     /// Captured for person/gait recognition.
     /// </param>
-    RecordingStatus Start(string label, string subject = "");
+    /// <param name="durationMs">
+    /// If &gt; 0, the recording auto-stops after this many milliseconds (enforced
+    /// server-side). 0 means manual/open-ended.
+    /// </param>
+    RecordingStatus Start(string label, string subject = "", int durationMs = 0);
 
     /// <summary>
     /// Finalizes the active session (the writer flushes, closes the payload file

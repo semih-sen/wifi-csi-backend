@@ -129,6 +129,12 @@ builder.Services.AddHostedService<BroadcastBackgroundService>();
 
 // Inference pump: drains inference results to SignalR + triggers MQTT automation.
 builder.Services.AddHostedService<InferenceBroadcastBackgroundService>();
+
+// Calibration broadcaster: pushes baseline calibration start/finish to SignalR clients.
+builder.Services.AddHostedService<CalibrationBroadcastBackgroundService>();
+
+// Recording auto-stop forwarder: broadcasts RecordingState when a timed recording ends.
+builder.Services.AddHostedService<RecordingAutoStopForwarder>();
 // Disk yazıcı işçi (Kayıt kanalını boşaltan motor)
 builder.Services.AddHostedService<RecordingBackgroundService>();
 

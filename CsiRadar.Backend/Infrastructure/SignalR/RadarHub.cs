@@ -54,14 +54,27 @@ public sealed class RadarHub : Hub
         SubcarrierCount = OnnxInput.Subcarriers,
         ModelLoaded = _evaluator.IsReady,
         Classes = _evaluator.Labels,
+        IsCalibrating = _calibration.IsCalibrating,
+        BaselineActive = _calibration.IsBaselineActive,
     };
 
     public override async Task OnConnectedAsync()
     {
-        // Bring a freshly-connected client in sync with the current recorder state.
+        // Bring a freshly-connected client in sync with current recorder + baseline state.
         await Clients.Caller.SendAsync("RecordingState", _recording.Status);
+        await Clients.Caller.SendAsync("CalibrationState", BuildCalibrationState(_calibration));
         await base.OnConnectedAsync();
     }
+
+    /// <summary>Snapshots the coordinator into the wire DTO (shared with the broadcaster).</summary>
+    internal static CalibrationStateDto BuildCalibrationState(CalibrationCoordinator c) => new()
+    {
+        IsCalibrating = c.IsCalibrating,
+        BaselineActive = c.IsBaselineActive,
+        Failed = c.LastFailed,
+        FramesRequested = c.FramesRequested,
+        TimestampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+    };
  
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
@@ -77,12 +90,18 @@ public sealed class RadarHub : Hub
     /// caller and broadcasts the new state to every connected client so multiple
     /// frontends stay in sync.
     /// </summary>
-    public async Task<RecordingStatus> StartRecording(string label, string? subject = null)
+    /// <param name="durationMs">
+    /// If &gt; 0, the backend auto-stops the recording after this many milliseconds
+    /// (enforced server-side, independent of the client). 0 = manual/open-ended.
+    /// NOTE: SignalR binds args positionally — clients must send all three.
+    /// </param>
+    public async Task<RecordingStatus> StartRecording(string label, string? subject, int durationMs)
     {
         if (string.IsNullOrWhiteSpace(label))
             label = "unlabeled";
 
-        RecordingStatus status = _recording.Start(label.Trim(), (subject ?? string.Empty).Trim());
+        RecordingStatus status = _recording.Start(
+            label.Trim(), (subject ?? string.Empty).Trim(), Math.Max(0, durationMs));
         await Clients.All.SendAsync("RecordingState", status);
         return status;
     }
@@ -102,6 +121,10 @@ public sealed class RadarHub : Hub
     /// Requests an empty-room baseline calibration (Phase 4). The processing consumer
     /// captures the next <paramref name="frames"/> frames and recomputes the baseline.
     /// Call this only when the room is known to be empty.
+    ///
+    /// NOTE: SignalR binds arguments positionally and does NOT fill C# default
+    /// parameters, so clients must send an explicit argument. Pass <c>0</c> (or any
+    /// value &lt; 1) to use the default capture size (<see cref="CalibrationCoordinator.DefaultFrames"/>).
     /// </summary>
     public string Calibrate(int frames = CalibrationCoordinator.DefaultFrames)
     {

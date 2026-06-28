@@ -33,6 +33,13 @@ public sealed record RecordingStatus
     [JsonPropertyName("startedAtUnixMs")]
     public long StartedAtUnixMs { get; init; }
 
+    /// <summary>
+    /// Unix ms when the recording will auto-stop, or 0 for a manual (open-ended)
+    /// recording. Lets the frontend show a countdown.
+    /// </summary>
+    [JsonPropertyName("stopAtUnixMs")]
+    public long StopAtUnixMs { get; init; }
+
     /// <summary>The canonical "not recording" value.</summary>
     public static readonly RecordingStatus Idle = new();
 }
@@ -72,4 +79,10 @@ public sealed class RecordingSessionInfo
     public bool BaselineApplied { get; init; }
 
     public long StartedAtUnixMs { get; init; }
+
+    /// <summary>
+    /// Unix ms at which the recording auto-stops, or 0 for a manual recording.
+    /// Set from the requested duration at <c>Start</c>.
+    /// </summary>
+    public long StopAtUnixMs { get; init; }
 }

@@ -109,6 +109,7 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
                 {
                     calRemaining = calReq;
                     calBuffer = new List<CsiData>(calReq);
+                    _calibration.NotifyStarted(calReq); // → UI shows "Calibrating…"
                     _logger.LogInformation(
                         "Baseline calibration started: capturing {N} empty-room frames.", calReq);
                 }
@@ -119,8 +120,10 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
                     {
                         _processor.UpdateBaseline(
                             System.Runtime.InteropServices.CollectionsMarshal.AsSpan(calBuffer!));
+                        _calibration.NotifyCompleted(_processor.IsCalibrated); // → UI badge
                         _logger.LogInformation(
-                            "Baseline calibration complete ({N} frames).", calBuffer!.Count);
+                            "Baseline calibration complete ({N} frames, baselineActive={Active}).",
+                            calBuffer!.Count, _processor.IsCalibrated);
                         calBuffer = null;
                     }
                 }

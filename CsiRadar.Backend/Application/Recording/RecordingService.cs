@@ -39,6 +39,17 @@ public sealed class RecordingService : IRecordingService
     private volatile RecordingSession? _active;
     private long _sessionSeed;
 
+    // Server-side auto-stop: armed when a recording is started with a duration, so the
+    // session ends on time even if the requesting client disconnects. Guarded by _gate.
+    private Timer? _autoStopTimer;
+
+    /// <summary>
+    /// Raised when a recording auto-stops (duration elapsed). A hosted forwarder
+    /// broadcasts the resulting <see cref="RecordingStatus"/> to clients — the service
+    /// stays decoupled from SignalR (manual stops are broadcast by the hub instead).
+    /// </summary>
+    public event Action<RecordingStatus>? AutoStopped;
+
     public RecordingService(
         IOptions<RecordingOptions> options,
         IOptions<ProcessingOptions> processing,
@@ -87,7 +98,7 @@ public sealed class RecordingService : IRecordingService
     }
 
     /// <inheritdoc />
-    public RecordingStatus Start(string label, string subject = "")
+    public RecordingStatus Start(string label, string subject = "", int durationMs = 0)
     {
         lock (_gate)
         {
@@ -100,6 +111,8 @@ public sealed class RecordingService : IRecordingService
             }
 
             long id = Interlocked.Increment(ref _sessionSeed);
+            long startedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            long stopAtUnixMs = durationMs > 0 ? startedAtUnixMs + durationMs : 0;
             var info = new RecordingSessionInfo
             {
                 SessionId = id,
@@ -112,7 +125,8 @@ public sealed class RecordingService : IRecordingService
                 SlideStep = _processing.SlideStep,
                 CaptureRaw = _options.CaptureRaw,
                 BaselineApplied = _processor.IsCalibrated,
-                StartedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                StartedAtUnixMs = startedAtUnixMs,
+                StopAtUnixMs = stopAtUnixMs,
             };
             var session = new RecordingSession(id, info);
 
@@ -132,11 +146,42 @@ public sealed class RecordingService : IRecordingService
             }
 
             _active = session; // volatile publish
+
+            // Arm the server-side auto-stop (one-shot). Disposed by Stop()/a new Start.
+            DisposeAutoStopTimerLocked();
+            if (durationMs > 0)
+                _autoStopTimer = new Timer(_ => OnAutoStop(id), null, durationMs, Timeout.Infinite);
+
             _logger.LogInformation(
-                "Recording started: session {Id}, label '{Label}', subject '{Subject}', baselineApplied={Baseline}.",
-                id, label, info.Subject, info.BaselineApplied);
+                "Recording started: session {Id}, label '{Label}', subject '{Subject}', " +
+                "baselineApplied={Baseline}, durationMs={DurationMs}.",
+                id, label, info.Subject, info.BaselineApplied, durationMs);
             return Snapshot(session);
         }
+    }
+
+    /// <summary>
+    /// Auto-stop callback (threadpool). Stops the session only if it is still the
+    /// active one — a manual stop or a newer session cancels this safely.
+    /// </summary>
+    private void OnAutoStop(long sessionId)
+    {
+        var current = _active;
+        if (current is null || current.Id != sessionId)
+            return;
+
+        RecordingStatus status = Stop();
+        if (status.SessionId == sessionId) // we actually stopped this session
+        {
+            _logger.LogInformation("Recording auto-stopped on schedule: session {Id}.", sessionId);
+            AutoStopped?.Invoke(status);
+        }
+    }
+
+    private void DisposeAutoStopTimerLocked()
+    {
+        _autoStopTimer?.Dispose();
+        _autoStopTimer = null;
     }
 
     /// <inheritdoc />
@@ -153,6 +198,7 @@ public sealed class RecordingService : IRecordingService
 
             // Stop the consumer from enqueuing first, then submit the Stop control.
             _active = null;
+            DisposeAutoStopTimerLocked(); // cancel any pending auto-stop for this session
 
             long captured = Interlocked.Read(ref session.Captured);
             long dropped = Interlocked.Read(ref session.Dropped);
@@ -225,5 +271,6 @@ public sealed class RecordingService : IRecordingService
         FramesCaptured = Interlocked.Read(ref s.Captured),
         FramesDropped = Interlocked.Read(ref s.Dropped),
         StartedAtUnixMs = s.Info.StartedAtUnixMs,
+        StopAtUnixMs = s.Info.StopAtUnixMs,
     };
 }

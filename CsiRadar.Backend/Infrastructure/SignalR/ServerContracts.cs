@@ -11,7 +11,11 @@ namespace CsiRadar.Backend.Infrastructure.SignalR;
 public static class ContractInfo
 {
     // 1.1: RecordingStatus gained `subject`; StartRecording gained a subject arg.
-    public const string Version = "1.1";
+    // 1.2: added the `CalibrationState` event + Calibrate method; ServerInfo gained
+    //      `isCalibrating` / `baselineActive`.
+    // 1.3: StartRecording gained a `durationMs` arg (server-side auto-stop);
+    //      RecordingStatus gained `stopAtUnixMs`.
+    public const string Version = "1.3";
 }
 
 /// <summary>
@@ -61,4 +65,41 @@ public sealed class ServerInfoDto
     /// <summary>Class labels in output-channel order (empty when no model is loaded).</summary>
     [JsonPropertyName("classes")]
     public IReadOnlyList<string> Classes { get; set; } = [];
+
+    /// <summary>True while a baseline calibration is currently in progress.</summary>
+    [JsonPropertyName("isCalibrating")]
+    public bool IsCalibrating { get; set; }
+
+    /// <summary>True once an empty-room baseline is captured and being subtracted live.</summary>
+    [JsonPropertyName("baselineActive")]
+    public bool BaselineActive { get; set; }
+}
+
+/// <summary>
+/// <c>CalibrationState</c> payload — pushed whenever baseline calibration starts or
+/// finishes so the UI can show a "Calibrating…" warning and a persistent
+/// "Baseline: Active" badge. Also returned (as fields) by <c>GetServerInfo</c> so a
+/// late-joining / reconnecting client renders the correct state immediately.
+/// </summary>
+public sealed class CalibrationStateDto
+{
+    [JsonPropertyName("isCalibrating")]
+    public bool IsCalibrating { get; set; }
+
+    [JsonPropertyName("baselineActive")]
+    public bool BaselineActive { get; set; }
+
+    /// <summary>
+    /// True if the most recent attempt failed — almost always because no CSI frames
+    /// were flowing (the sensor isn't streaming), so there was nothing to average.
+    /// </summary>
+    [JsonPropertyName("failed")]
+    public bool Failed { get; set; }
+
+    /// <summary>Frames in the active/just-finished calibration capture.</summary>
+    [JsonPropertyName("framesRequested")]
+    public int FramesRequested { get; set; }
+
+    [JsonPropertyName("timestampMs")]
+    public long TimestampMs { get; set; }
 }
