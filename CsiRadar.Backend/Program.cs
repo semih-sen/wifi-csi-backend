@@ -24,6 +24,9 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<MqttOptions>(
     builder.Configuration.GetSection(MqttOptions.SectionName));
 
+builder.Services.Configure<IngestionOptions>(
+    builder.Configuration.GetSection(IngestionOptions.SectionName));
+
 builder.Services.Configure<ProcessingOptions>(
     builder.Configuration.GetSection(ProcessingOptions.SectionName));
 
@@ -33,9 +36,16 @@ builder.Services.Configure<InferenceOptions>(
 // ──────────────────────────────────────────────────────
 // 2. BUFFER LAYER — Bounded Channel (Producer-Consumer bridge)
 // ──────────────────────────────────────────────────────
-// Singleton: Single channel instance shared between MQTT producer and processing consumer.
+// Singleton: raw per-RX channel shared between the MQTT producer and the alignment stage.
 // BoundedChannel with DropOldest backpressure (1024 frames ≈ 10 sec at 100 Hz).
 builder.Services.AddSingleton<CsiDataChannelManager>();
+
+// Aligned channel: paired [RX0, RX1] frames emitted by the alignment stage and read
+// by the processing consumer (V2 Phase 1 multi-source ingestion).
+builder.Services.AddSingleton<AlignedCsiChannelManager>();
+
+// Ingestion diagnostics: lock-free per-RX / pairing counters surfaced at /health.
+builder.Services.AddSingleton<IngestionDiagnostics>();
 
 // Loss-tolerant broadcast channel (depth 2, DropOldest) that decouples SignalR
 // transport from the inference-critical consumer — a slow client cannot stall ingestion.
@@ -117,8 +127,11 @@ builder.Services.AddSignalR(options =>
 // 6. HOSTED SERVICES — Background workers
 // ──────────────────────────────────────────────────────
 
-// Producer: MQTT listener that ingests CSI data into the channel.
+// Producer: MQTT listener that ingests binary CSI frames into the raw channel.
 builder.Services.AddHostedService<MqttListenerBackgroundService>();
+
+// Alignment: pairs raw per-RX frames by seqNo into the aligned channel (V2 Phase 1).
+builder.Services.AddHostedService<CsiAlignmentBackgroundService>();
 
 // Consumer: Processing pipeline that reads from the channel,
 // filters signals, runs inference, and enqueues graph frames for broadcast.
@@ -165,6 +178,7 @@ app.MapGet("/health", (
     IOnnxModelEvaluator evaluator,
     ICsiStreamProcessor processor,
     IRecordingService recording,
+    IngestionDiagnostics ingestion,
     Microsoft.Extensions.Options.IOptions<ProcessingOptions> processing) =>
 {
     var p = processing.Value;
@@ -173,6 +187,9 @@ app.MapGet("/health", (
         status = "ok",
         contractVersion = CsiRadar.Backend.Infrastructure.SignalR.ContractInfo.Version,
         model = new { loaded = evaluator.IsReady, classes = evaluator.Labels },
+        // V2 Phase 1 exit-criteria surface: per-RX frame rate, pairing rate, unpaired
+        // drops, and the asserted binary protocol version.
+        ingestion = ingestion.Snapshot(),
         processing = new
         {
             p.WindowSize,

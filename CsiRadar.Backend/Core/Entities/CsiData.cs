@@ -62,4 +62,23 @@ public sealed class CsiData
     /// Source MAC address of the transmitting ESP32.
     /// </summary>
     public string? SourceMac { get; set; }
+
+    /// <summary>
+    /// V2 multi-source ingestion: 48-bit source MAC of the RX device that measured
+    /// this frame, packed big-endian into a <see cref="long"/> (MSB first:
+    /// <c>b0&lt;&lt;40 | b1&lt;&lt;32 | … | b5</c>). This is the alignment key's
+    /// device discriminator — the alignment buffer maps it to the RX0/RX1 slot
+    /// configured in <c>IngestionOptions</c>. Cheap to compare (one long), unlike the
+    /// formatted <see cref="SourceMac"/> string (which the hot path never sets).
+    /// </summary>
+    public long DeviceMac { get; set; }
+
+    /// <summary>
+    /// V2 multi-source ingestion: monotonic sequence number echoed from the TX ping
+    /// that produced this frame. Both RX echo the <c>seqNo</c> of the frame they
+    /// measured, so the backend aligns the two streams <b>by seqNo</b> — never by
+    /// wall-clock, since the two ESP32 clocks are independent. uint32 wraps after
+    /// ~2³² frames (≈497 days at 100 Hz), which the alignment window tolerates.
+    /// </summary>
+    public uint SeqNo { get; set; }
 }

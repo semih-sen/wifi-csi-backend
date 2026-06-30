@@ -15,7 +15,9 @@ namespace CsiRadar.Backend.Application.Processing;
 /// Background service that acts as the CONSUMER in the Producer-Consumer pipeline.
 ///
 /// Stream model (per frame, exactly once):
-///   1. Read a raw CSI frame from Channel&lt;CsiData&gt; via ReadAllAsync.
+///   1. Read an aligned RX pair from Channel&lt;AlignedCsiFrame&gt; via ReadAllAsync
+///      and take its RX0 (primary) side. (Phase 3 fusion will consume both RX here;
+///      until then the legacy single-stream pipeline runs on RX0.)
 ///   2. Demodulate + baseline-subtract + IIR-filter it via <see cref="ICsiStreamProcessor"/>
 ///      and append the filtered frame to a flat <see cref="CsiRingBuffer"/>.
 ///   3. Tap the filtered frame into <see cref="IRecordingService"/> (a no-op when
@@ -34,7 +36,7 @@ namespace CsiRadar.Backend.Application.Processing;
 /// </summary>
 public sealed class CsiProcessingBackgroundService : BackgroundService
 {
-    private readonly CsiDataChannelManager _channelManager;
+    private readonly AlignedCsiChannelManager _alignedChannel;
     private readonly ICsiStreamProcessor _processor;
     private readonly CalibrationCoordinator _calibration;
     private readonly IOnnxModelEvaluator _modelEvaluator;
@@ -51,7 +53,7 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
     private long _inferences;
 
     public CsiProcessingBackgroundService(
-        CsiDataChannelManager channelManager,
+        AlignedCsiChannelManager alignedChannel,
         ICsiStreamProcessor processor,
         CalibrationCoordinator calibration,
         IOnnxModelEvaluator modelEvaluator,
@@ -62,7 +64,7 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
         IOptions<ProcessingOptions> options,
         ILogger<CsiProcessingBackgroundService> logger)
     {
-        _channelManager = channelManager;
+        _alignedChannel = alignedChannel;
         _processor = processor;
         _calibration = calibration;
         _modelEvaluator = modelEvaluator;
@@ -96,8 +98,11 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
 
         try
         {
-            await foreach (var csiData in _channelManager.Reader.ReadAllAsync(stoppingToken))
+            await foreach (var aligned in _alignedChannel.Reader.ReadAllAsync(stoppingToken))
             {
+                // Phase 1: legacy single-stream pipeline runs on the RX0 (primary) side
+                // of each aligned pair. Phase 3 fusion will consume RX1 here too.
+                CsiData csiData = aligned.Rx0;
                 Interlocked.Increment(ref _framesConsumed);
 
                 // ── Baseline calibration capture (Phase 4) ──

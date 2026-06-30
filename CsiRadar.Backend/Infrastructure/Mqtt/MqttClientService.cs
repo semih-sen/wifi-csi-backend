@@ -1,5 +1,6 @@
-using System.Text.Json;
+using System.Buffers;
 using CsiRadar.Backend.Application.Channels;
+using CsiRadar.Backend.Application.Processing;
 using CsiRadar.Backend.Core.Configuration;
 using CsiRadar.Backend.Core.Entities;
 using CsiRadar.Backend.Core.Interfaces;
@@ -14,25 +15,26 @@ namespace CsiRadar.Backend.Infrastructure.Mqtt;
 ///
 /// Responsibilities:
 ///   - Connects to the Mosquitto broker and subscribes to the CSI topic
-///   - Deserializes incoming JSON payloads using source-generated System.Text.Json
-///   - Writes parsed CsiData into the BoundedChannel via TryWrite (non-blocking)
+///   - Decodes incoming binary payloads via the versioned <see cref="CsiBinaryProtocol"/>
+///   - Writes decoded per-RX CsiData into the BoundedChannel via TryWrite (non-blocking)
 ///   - Publishes messages for Home Assistant automation triggers
 ///   - Auto-reconnects on unexpected disconnections
 ///
 /// HOT-PATH CONTRACT:
 ///   The <see cref="OnMessageReceivedAsync"/> handler is the hottest code path
-///   in the entire system (~100 invocations/sec). It MUST:
-///     ✓ Use source-generated JSON (no reflection)
+///   in the entire system (~200 invocations/sec across two RX). It MUST:
+///     ✓ Decode the fixed binary layout (no reflection, no string parsing)
 ///     ✓ Call TryWrite (never awaitable WriteAsync)
 ///     ✓ Return Task.CompletedTask (cached, zero-alloc)
 ///     ✗ Never call Task.Run
-///     ✗ Never perform I/O, logging, or math
-///     ✗ Never allocate beyond the CsiData object itself
+///     ✗ Never perform I/O, logging, or math (the version-drift log fires once only)
+///     ✗ Never allocate beyond the CsiData object + its I/Q buffer
 /// </summary>
 public sealed class MqttClientService : IMqttClientService, IAsyncDisposable
 {
     private readonly MqttOptions _options;
     private readonly CsiDataChannelManager _channelManager;
+    private readonly IngestionDiagnostics _diagnostics;
     private readonly ILogger<MqttClientService> _logger;
     private readonly CancellationTokenSource _cts = new();
     private readonly MqttClientFactory _factory = new();
@@ -41,29 +43,21 @@ public sealed class MqttClientService : IMqttClientService, IAsyncDisposable
     private MqttClientOptions? _clientOptions;
     private MqttClientSubscribeOptions? _subscribeOptions;
 
-    // ── Diagnostics counters (lock-free, read via Interlocked) ──
-    private long _messagesReceived;
-    private long _messagesEnqueued;
-    private long _messagesDropped;
-    private long _deserializationErrors;
+    // Latched so a firmware/backend protocol-version drift is reported once, loudly,
+    // without spamming the hot path at the frame rate.
+    private int _versionMismatchLogged;
 
     public MqttClientService(
         IOptions<MqttOptions> options,
         CsiDataChannelManager channelManager,
+        IngestionDiagnostics diagnostics,
         ILogger<MqttClientService> logger)
     {
         _options = options.Value;
         _channelManager = channelManager;
+        _diagnostics = diagnostics;
         _logger = logger;
     }
-
-    /// <summary>
-    /// Current diagnostic counters for monitoring.
-    /// </summary>
-    public long MessagesReceived => Interlocked.Read(ref _messagesReceived);
-    public long MessagesEnqueued => Interlocked.Read(ref _messagesEnqueued);
-    public long MessagesDropped => Interlocked.Read(ref _messagesDropped);
-    public long DeserializationErrors => Interlocked.Read(ref _deserializationErrors);
 
     /// <inheritdoc />
     public async Task ConnectAsync(CancellationToken cancellationToken)
@@ -130,9 +124,11 @@ public sealed class MqttClientService : IMqttClientService, IAsyncDisposable
             }
         }
 
+        var s = _diagnostics.Snapshot();
         _logger.LogInformation(
-            "MQTT client stopped. Stats: Received={Received}, Enqueued={Enqueued}, Dropped={Dropped}, Errors={Errors}",
-            MessagesReceived, MessagesEnqueued, MessagesDropped, DeserializationErrors);
+            "MQTT client stopped. Stats: Received={Received}, Decoded={Decoded}, Dropped={Dropped}, " +
+            "BadMagic={BadMagic}, VersionMismatch={VersionMismatch}, Truncated={Truncated}.",
+            s.MessagesReceived, s.Decoded, s.Dropped, s.BadMagic, s.VersionMismatch, s.Truncated);
     }
 
     /// <inheritdoc />
@@ -160,81 +156,79 @@ public sealed class MqttClientService : IMqttClientService, IAsyncDisposable
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// HOT PATH — Called ~100 times/second.
+    /// HOT PATH — Called ~200 times/second (two RX at 100 Hz).
     ///
     /// Pipeline:
-    ///   1. Read PayloadSegment (zero-copy from MQTTnet's internal buffer)
-    ///   2. Deserialize via source-generated JSON (no reflection, minimal alloc)
-    ///   3. Map DTO → CsiData (lightweight object creation)
-    ///   4. TryWrite into BoundedChannel (non-blocking, lock-free)
+    ///   1. Read the payload (zero-copy ReadOnlySpan for the single-segment case)
+    ///   2. Decode the versioned binary layout via <see cref="CsiBinaryProtocol.TryParse"/>
+    ///      (asserts magic + version; copies the int8 I/Q out of the transient buffer)
+    ///   3. TryWrite the decoded per-RX frame into the raw BoundedChannel
+    ///   4. Tally the decode outcome on <see cref="IngestionDiagnostics"/>
     ///   5. Return Task.CompletedTask (cached singleton, zero-alloc)
     ///
-    /// NEVER add: Task.Run, logging, I/O, LINQ, string formatting, exceptions
-    /// in the normal flow. The catch block is the ONLY exception path.
+    /// Alignment by seqNo happens one stage downstream (the alignment service), off
+    /// this thread — the listener stays ultra-lean.
+    ///
+    /// NEVER add: Task.Run, per-message logging, I/O, LINQ, string formatting. The
+    /// one-shot version-drift warning is the only logging path.
     /// </summary>
     private Task OnMessageReceivedAsync(MqttApplicationMessageReceivedEventArgs e)
     {
-        Interlocked.Increment(ref _messagesReceived);
+        _diagnostics.IncMessagesReceived();
 
-        // ── Step 1: Extract raw bytes from ReadOnlySequence ──
-        // MQTTnet v5 exposes Payload as ReadOnlySequence<byte>.
-        // For single-segment sequences (the common case at small payloads),
-        // we get a zero-copy ReadOnlySpan directly.
         var payload = e.ApplicationMessage.Payload;
         if (payload.IsEmpty)
             return Task.CompletedTask;
 
-        try
+        long timestampTicks = DateTime.UtcNow.Ticks;
+
+        CsiBinaryParseStatus status;
+        CsiData? csiData;
+        if (payload.IsSingleSegment)
         {
-            // ── Step 2: Source-gen JSON deserialization ──
-            // Single-segment fast path avoids any allocation.
-            CsiPayloadDto? dto;
-            if (payload.IsSingleSegment)
-            {
-                dto = JsonSerializer.Deserialize(
-                    payload.FirstSpan,
-                    CsiJsonContext.Default.CsiPayloadDto);
-            }
-            else
-            {
-                // Multi-segment fallback (rare for small CSI payloads).
-                // Utf8JsonReader natively supports ReadOnlySequence<byte>.
-                var reader = new Utf8JsonReader(payload);
-                dto = JsonSerializer.Deserialize(
-                    ref reader,
-                    CsiJsonContext.Default.CsiPayloadDto);
-            }
-
-            if (dto?.Data is null)
-                return Task.CompletedTask;
-
-            // ── Step 3: Map DTO → Domain entity (no processing) ──
-            var csiData = new CsiData
-            {
-                TimestampTicks = DateTime.UtcNow.Ticks,
-                RawCsiData = dto.Data,
-                RawDataLength = dto.Len > 0 ? dto.Len : dto.Data.Length,
-                Rssi = dto.Rssi,
-                SourceMac = dto.Mac
-            };
-
-            // ── Step 4: Non-blocking channel write ──
-            // With BoundedChannelFullMode.DropOldest, TryWrite always
-            // succeeds unless the channel writer has been completed.
-            if (_channelManager.Writer.TryWrite(csiData))
-            {
-                Interlocked.Increment(ref _messagesEnqueued);
-            }
-            else
-            {
-                Interlocked.Increment(ref _messagesDropped);
-            }
+            status = CsiBinaryProtocol.TryParse(payload.FirstSpan, timestampTicks, out csiData);
         }
-        catch (JsonException)
+        else
         {
-            // Malformed JSON from ESP32 — count but don't log per-message
-            // to avoid I/O in the hot path.
-            Interlocked.Increment(ref _deserializationErrors);
+            // Multi-segment fallback (rare for small CSI payloads): coalesce into a
+            // contiguous span. Small frames go on the stack; oversized ones rent.
+            int len = (int)payload.Length;
+            byte[]? rented = len <= 512 ? null : ArrayPool<byte>.Shared.Rent(len);
+            Span<byte> tmp = rented is null ? stackalloc byte[len] : rented.AsSpan(0, len);
+            payload.CopyTo(tmp);
+            status = CsiBinaryProtocol.TryParse(tmp, timestampTicks, out csiData);
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
+
+        switch (status)
+        {
+            case CsiBinaryParseStatus.Ok:
+                // DropOldest: TryWrite only fails if the writer has been completed.
+                if (_channelManager.Writer.TryWrite(csiData!))
+                    _diagnostics.IncDecoded();
+                else
+                    _diagnostics.IncDropped();
+                break;
+
+            case CsiBinaryParseStatus.BadMagic:
+                _diagnostics.IncBadMagic();
+                break;
+
+            case CsiBinaryParseStatus.UnsupportedVersion:
+                _diagnostics.IncVersionMismatch();
+                // Loud-once: protocol drift between firmware and backend must be visible.
+                if (Interlocked.Exchange(ref _versionMismatchLogged, 1) == 0)
+                    _logger.LogError(
+                        "Binary CSI payload version mismatch (backend expects v{Version}). " +
+                        "Firmware/backend protocol drift — frames are being rejected. " +
+                        "Suppressing further version logs.", CsiBinaryProtocol.Version);
+                break;
+
+            case CsiBinaryParseStatus.TooShort:
+            case CsiBinaryParseStatus.Truncated:
+                _diagnostics.IncTruncated();
+                break;
         }
 
         return Task.CompletedTask;
