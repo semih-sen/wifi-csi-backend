@@ -12,11 +12,14 @@ namespace CsiRadar.Backend.Tests;
 /// </summary>
 public class InferenceDebouncerTests
 {
+    private const string IdleLabel = "EmptyRoom";
+
     private static InferenceDebouncer Build(int consecutive = 3, float threshold = 0.7f) =>
         new(Options.Create(new InferenceOptions
         {
             ConsecutiveCountForAutomation = consecutive,
             ConfidenceThreshold = threshold,
+            DefaultIdleLabel = IdleLabel,
         }));
 
     private static InferenceResult Result(string label, float confidence) =>
@@ -42,11 +45,11 @@ public class InferenceDebouncerTests
     }
 
     [Fact]
-    public void LowConfidenceCollapsesToUnknown()
+    public void LowConfidenceCollapsesToIdleLabel()
     {
         var d = Build(consecutive: 2, threshold: 0.7f);
         Assert.Null(d.Push(Result("Walking", 0.5f)));
-        Assert.Equal(InferenceDebouncer.Unknown, d.Push(Result("CatPassed", 0.4f)));
+        Assert.Equal(IdleLabel, d.Push(Result("CatPassed", 0.4f)));
     }
 
     [Fact]

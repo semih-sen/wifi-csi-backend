@@ -15,18 +15,19 @@ namespace CsiRadar.Backend.Application.MachineLearning;
 ///   - the broadcast service then DEDUPES confirmed statuses before publishing to
 ///     MQTT, so an unchanged confirmation is not re-published.
 ///
-/// A prediction below <see cref="InferenceOptions.ConfidenceThreshold"/> collapses to
-/// the synthetic label <see cref="Unknown"/>, so a flurry of low-confidence windows
-/// confirms "Unknown" rather than latching the last confident label forever.
+/// Low-confidence predictions are already clamped to
+/// <see cref="InferenceOptions.DefaultIdleLabel"/> upstream in
+/// <see cref="OnnxModelEvaluator.Predict"/>, so a flurry of sub-threshold windows
+/// confirms the resting state rather than latching the last confident label forever.
+/// The threshold is re-applied here defensively in case a result reaches the
+/// debouncer without having been clamped.
 ///
 /// Stateful and NOT thread-safe — only the single processing consumer drives it.
 /// </summary>
 public sealed class InferenceDebouncer
 {
-    /// <summary>Synthetic label emitted when confidence is below threshold.</summary>
-    public const string Unknown = "Unknown";
-
     private readonly float _confidenceThreshold;
+    private readonly string _defaultIdleLabel;
     private readonly int _consecutiveRequired;
 
     private string _candidate = string.Empty;
@@ -37,6 +38,7 @@ public sealed class InferenceDebouncer
     {
         var cfg = options.Value;
         _confidenceThreshold = cfg.ConfidenceThreshold;
+        _defaultIdleLabel = cfg.DefaultIdleLabel;
         _consecutiveRequired = Math.Max(1, cfg.ConsecutiveCountForAutomation);
     }
 
@@ -50,7 +52,7 @@ public sealed class InferenceDebouncer
     {
         string label = result.Confidence >= _confidenceThreshold
             ? result.PredictedLabel
-            : Unknown;
+            : _defaultIdleLabel;
 
         if (label == _candidate)
         {

@@ -24,9 +24,20 @@ public sealed class InferenceOptions
 
     /// <summary>
     /// Minimum confidence threshold for a prediction to be considered valid.
-    /// Results below this are reported as "Unknown".
+    /// When the top confidence is strictly below this, the primary label is clamped
+    /// to <see cref="DefaultIdleLabel"/> (both for the UI broadcast and the
+    /// automation debounce) instead of reporting a flickery low-confidence class.
     /// </summary>
     public float ConfidenceThreshold { get; set; } = 0.7f;
+
+    /// <summary>
+    /// The resting-state label used whenever the top prediction's confidence is
+    /// below <see cref="ConfidenceThreshold"/>. This keeps the UI from flickering
+    /// with low-confidence labels (e.g. "60% Walking") and gives the debouncer a
+    /// real idle class to settle on rather than a synthetic "Unknown".
+    /// Must be one of the labels in labels.json for the score map to stay consistent.
+    /// </summary>
+    public string DefaultIdleLabel { get; set; } = "EmptyRoom";
 
     /// <summary>
     /// Number of consecutive identical predictions required before triggering

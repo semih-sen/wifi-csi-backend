@@ -32,6 +32,8 @@ public sealed class OnnxModelEvaluator : IOnnxModelEvaluator, IDisposable
     private readonly InferenceSession? _session;
     private readonly string _inputName = OnnxInput.TensorName;
     private readonly string _outputName = OnnxInput.OutputTensorName;
+    private readonly float _confidenceThreshold;
+    private readonly string _defaultIdleLabel;
 
     public OnnxModelEvaluator(
         IOptions<InferenceOptions> options,
@@ -39,6 +41,8 @@ public sealed class OnnxModelEvaluator : IOnnxModelEvaluator, IDisposable
     {
         _logger = logger;
         var cfg = options.Value;
+        _confidenceThreshold = cfg.ConfidenceThreshold;
+        _defaultIdleLabel = cfg.DefaultIdleLabel;
 
         if (!File.Exists(cfg.ModelPath))
         {
@@ -109,7 +113,17 @@ public sealed class OnnxModelEvaluator : IOnnxModelEvaluator, IDisposable
         window[..OnnxInput.Length].CopyTo(buffer);
 
         float[] probabilities = RunSession(buffer);
-        return _labelMap!.Map(probabilities, DateTime.UtcNow.Ticks);
+        var result = _labelMap!.Map(probabilities, DateTime.UtcNow.Ticks);
+
+        // Clamp low-confidence predictions to the resting state at the source, so
+        // EVERY downstream consumer (the SignalR/UI broadcast AND the automation
+        // debounce) sees a stable idle label instead of a flickery sub-threshold
+        // class. We only overwrite the primary label — Scores keeps the full,
+        // unmodified probability distribution for diagnostics/visualization.
+        if (result.Confidence < _confidenceThreshold)
+            result.PredictedLabel = _defaultIdleLabel;
+
+        return result;
     }
 
     /// <summary>Runs the session on a 6400-float buffer and returns the output vector.</summary>
