@@ -47,6 +47,12 @@ builder.Services.AddSingleton<AlignedCsiChannelManager>();
 // Ingestion diagnostics: lock-free per-RX / pairing counters surfaced at /health.
 builder.Services.AddSingleton<IngestionDiagnostics>();
 
+// Phase 2 per-RX DSP stage: input (fanned out from alignment) + output (Phase 3 seam)
+// channels and its observability counters.
+builder.Services.AddSingleton<DspInputChannelManager>();
+builder.Services.AddSingleton<DspOutputChannelManager>();
+builder.Services.AddSingleton<DspDiagnostics>();
+
 // Loss-tolerant broadcast channel (depth 2, DropOldest) that decouples SignalR
 // transport from the inference-critical consumer — a slow client cannot stall ingestion.
 builder.Services.AddSingleton<SignalBroadcastChannelManager>();
@@ -133,6 +139,9 @@ builder.Services.AddHostedService<MqttListenerBackgroundService>();
 // Alignment: pairs raw per-RX frames by seqNo into the aligned channel (V2 Phase 1).
 builder.Services.AddHostedService<CsiAlignmentBackgroundService>();
 
+// Per-RX DSP: derives amplitude + sanitized phase + Doppler from each RX (V2 Phase 2).
+builder.Services.AddHostedService<CsiDspBackgroundService>();
+
 // Consumer: Processing pipeline that reads from the channel,
 // filters signals, runs inference, and enqueues graph frames for broadcast.
 builder.Services.AddHostedService<CsiProcessingBackgroundService>();
@@ -179,6 +188,7 @@ app.MapGet("/health", (
     ICsiStreamProcessor processor,
     IRecordingService recording,
     IngestionDiagnostics ingestion,
+    DspDiagnostics dsp,
     Microsoft.Extensions.Options.IOptions<ProcessingOptions> processing) =>
 {
     var p = processing.Value;
@@ -190,6 +200,8 @@ app.MapGet("/health", (
         // V2 Phase 1 exit-criteria surface: per-RX frame rate, pairing rate, unpaired
         // drops, and the asserted binary protocol version.
         ingestion = ingestion.Snapshot(),
+        // V2 Phase 2 exit-criteria surface: per-RX DSP frame rate + Doppler columns.
+        dsp = dsp.Snapshot(),
         processing = new
         {
             p.WindowSize,

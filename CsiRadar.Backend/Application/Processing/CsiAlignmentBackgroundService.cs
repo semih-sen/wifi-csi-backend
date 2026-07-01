@@ -20,6 +20,7 @@ public sealed class CsiAlignmentBackgroundService : BackgroundService
 {
     private readonly CsiDataChannelManager _rawChannel;
     private readonly AlignedCsiChannelManager _alignedChannel;
+    private readonly DspInputChannelManager _dspInputChannel;
     private readonly IngestionDiagnostics _diagnostics;
     private readonly IngestionOptions _options;
     private readonly ILogger<CsiAlignmentBackgroundService> _logger;
@@ -27,12 +28,14 @@ public sealed class CsiAlignmentBackgroundService : BackgroundService
     public CsiAlignmentBackgroundService(
         CsiDataChannelManager rawChannel,
         AlignedCsiChannelManager alignedChannel,
+        DspInputChannelManager dspInputChannel,
         IngestionDiagnostics diagnostics,
         IOptions<IngestionOptions> options,
         ILogger<CsiAlignmentBackgroundService> logger)
     {
         _rawChannel = rawChannel;
         _alignedChannel = alignedChannel;
+        _dspInputChannel = dspInputChannel;
         _diagnostics = diagnostics;
         _options = options.Value;
         _logger = logger;
@@ -68,7 +71,14 @@ public sealed class CsiAlignmentBackgroundService : BackgroundService
             {
                 var paired = buffer.Accept(frame, DateTime.UtcNow.Ticks);
                 if (paired is not null)
-                    _alignedChannel.Writer.TryWrite(paired); // loss-tolerant (DropOldest)
+                {
+                    // Fan-out (both loss-tolerant DropOldest): the legacy Phase 1 path
+                    // (live graph/recording on RX0) and the new Phase 2 per-RX DSP branch
+                    // consume the same aligned pair independently, so DSP never perturbs
+                    // the proven live path.
+                    _alignedChannel.Writer.TryWrite(paired);
+                    _dspInputChannel.Writer.TryWrite(paired);
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
