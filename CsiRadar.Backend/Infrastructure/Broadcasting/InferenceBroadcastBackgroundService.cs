@@ -7,8 +7,8 @@ namespace CsiRadar.Backend.Infrastructure.Broadcasting;
 
 /// <summary>
 /// Drains the inference broadcast channel and pushes results to clients off the
-/// inference-critical consumer thread, mirroring <see cref="BroadcastBackgroundService"/>
-/// for graph frames.
+/// inference-critical consumer thread, mirroring <see cref="DspBroadcastBackgroundService"/>
+/// for viz frames.
 ///
 /// Every message broadcasts a per-window <c>ReceiveInference</c> event (so the UI's
 /// live scores animate). When a message carries a freshly confirmed status, it also

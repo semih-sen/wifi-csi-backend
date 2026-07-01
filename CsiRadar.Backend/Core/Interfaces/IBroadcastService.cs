@@ -7,10 +7,10 @@ namespace CsiRadar.Backend.Core.Interfaces;
 /// Pushes inference results to connected clients via SignalR (WebSocket) and
 /// triggers Home Assistant automations via MQTT publishing.
 ///
-/// High-frequency CSI graph frames do NOT go through this interface — they are
-/// enqueued onto a loss-tolerant broadcast channel and drained to SignalR by a
-/// dedicated pump (<c>BroadcastBackgroundService</c>), so a slow client can never
-/// back-pressure the inference-critical consumer loop.
+/// High-frequency viz frames do NOT go through this interface — they are enqueued
+/// onto a loss-tolerant broadcast channel and drained to SignalR by a dedicated pump
+/// (<c>DspBroadcastBackgroundService</c>), so a slow client can never back-pressure
+/// the inference-critical consumer loop.
 /// </summary>
 public interface IBroadcastService
 {

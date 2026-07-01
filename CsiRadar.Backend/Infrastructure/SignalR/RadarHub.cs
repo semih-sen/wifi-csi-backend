@@ -1,5 +1,6 @@
 using CsiRadar.Backend.Application.MachineLearning;
 using CsiRadar.Backend.Application.Processing;
+using CsiRadar.Backend.Application.Processing.Dsp;
 using CsiRadar.Backend.Core.Configuration;
 using CsiRadar.Backend.Core.Entities;
 using CsiRadar.Backend.Core.Interfaces;
@@ -11,11 +12,11 @@ namespace CsiRadar.Backend.Infrastructure.SignalR;
 /// <summary>
 /// SignalR Hub for real-time CSI radar data streaming.
 /// Connected clients (Web/Mobile/Flutter) receive:
-///   - Processed CSI signal data for live graph visualization
+///   - Per-RX DSP viz frames (amplitude + Doppler) for the live canvases
 ///   - ONNX inference results (predicted activity labels)
 ///
-/// Client methods:
-///   - ReceiveCsiData: Called when new processed CSI data is available
+/// Server → client events:
+///   - ReceiveDspFrame: 10 Hz per-RX amplitude + aggregated Doppler viz tap
 ///   - ReceiveInference: Called when a new inference result is produced
 ///   - ReceiveStatus: Called when a confirmed status change occurs
 /// </summary>
@@ -56,6 +57,10 @@ public sealed class RadarHub : Hub
         Classes = _evaluator.Labels,
         IsCalibrating = _calibration.IsCalibrating,
         BaselineActive = _calibration.IsBaselineActive,
+        // V2 viz metadata (contract 1.4): the DSP panels size their canvases from these.
+        Subcarriers = DspContract.Subcarriers,
+        DopplerBins = DspContract.StftBins,
+        DopplerCadenceHz = CsiDspBackgroundService.BroadcastHz,
     };
 
     public override async Task OnConnectedAsync()

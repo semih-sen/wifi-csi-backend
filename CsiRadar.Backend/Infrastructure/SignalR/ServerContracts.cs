@@ -15,7 +15,10 @@ public static class ContractInfo
     //      `isCalibrating` / `baselineActive`.
     // 1.3: StartRecording gained a `durationMs` arg (server-side auto-stop);
     //      RecordingStatus gained `stopAtUnixMs`.
-    public const string Version = "1.3";
+    // 1.4: retired `ReceiveCsiData`/`CsiFrame` (V1 single-RX graph); added the per-RX
+    //      `ReceiveDspFrame` event + `DspFrameDto`; ServerInfo gained viz metadata
+    //      (`subcarriers`, `dopplerBins`, `dopplerCadenceHz`).
+    public const string Version = "1.4";
 }
 
 /// <summary>
@@ -73,6 +76,21 @@ public sealed class ServerInfoDto
     /// <summary>True once an empty-room baseline is captured and being subtracted live.</summary>
     [JsonPropertyName("baselineActive")]
     public bool BaselineActive { get; set; }
+
+    // ── V2 viz metadata (contract 1.4) — lets the DSP panels size their canvases from
+    //    the server contract instead of hardcoding 64/33/10. ──
+
+    /// <summary>Subcarriers per RX in a <c>ReceiveDspFrame</c> amplitude vector (DSP layer).</summary>
+    [JsonPropertyName("subcarriers")]
+    public int Subcarriers { get; set; }
+
+    /// <summary>Doppler magnitude bins per RX (<c>dopplerMean</c> length) — one-sided DC…Nyquist.</summary>
+    [JsonPropertyName("dopplerBins")]
+    public int DopplerBins { get; set; }
+
+    /// <summary>Throttled broadcast cadence of <c>ReceiveDspFrame</c>, in Hz.</summary>
+    [JsonPropertyName("dopplerCadenceHz")]
+    public double DopplerCadenceHz { get; set; }
 }
 
 /// <summary>

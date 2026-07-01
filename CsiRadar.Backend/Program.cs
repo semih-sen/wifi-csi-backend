@@ -53,9 +53,10 @@ builder.Services.AddSingleton<DspInputChannelManager>();
 builder.Services.AddSingleton<DspOutputChannelManager>();
 builder.Services.AddSingleton<DspDiagnostics>();
 
-// Loss-tolerant broadcast channel (depth 2, DropOldest) that decouples SignalR
-// transport from the inference-critical consumer — a slow client cannot stall ingestion.
-builder.Services.AddSingleton<SignalBroadcastChannelManager>();
+// DSP viz broadcast channel (depth 2, DropOldest): the 10 Hz per-RX amplitude+Doppler
+// tap that feeds the frontend, decoupled from the DSP stage. Replaces the retired V1
+// single-RX graph broadcast.
+builder.Services.AddSingleton<DspBroadcastChannelManager>();
 
 // Inference broadcast channel (depth 64, DropOldest): carries per-window inference
 // results + confirmed statuses to the inference pump, off the consumer thread.
@@ -143,11 +144,11 @@ builder.Services.AddHostedService<CsiAlignmentBackgroundService>();
 builder.Services.AddHostedService<CsiDspBackgroundService>();
 
 // Consumer: Processing pipeline that reads from the channel,
-// filters signals, runs inference, and enqueues graph frames for broadcast.
+// filters signals, and runs inference/recording (RX0). No longer broadcasts a graph.
 builder.Services.AddHostedService<CsiProcessingBackgroundService>();
 
-// Broadcast pump: drains the broadcast channel to SignalR off the consumer thread.
-builder.Services.AddHostedService<BroadcastBackgroundService>();
+// DSP viz pump: drains the 10 Hz DSP tap to SignalR (ReceiveDspFrame) off the DSP thread.
+builder.Services.AddHostedService<DspBroadcastBackgroundService>();
 
 // Inference pump: drains inference results to SignalR + triggers MQTT automation.
 builder.Services.AddHostedService<InferenceBroadcastBackgroundService>();

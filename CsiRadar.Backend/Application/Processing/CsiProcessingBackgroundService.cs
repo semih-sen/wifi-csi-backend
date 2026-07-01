@@ -4,7 +4,6 @@ using CsiRadar.Backend.Application.MachineLearning;
 using CsiRadar.Backend.Core.Configuration;
 using CsiRadar.Backend.Core.Entities;
 using CsiRadar.Backend.Core.Interfaces;
-using CsiRadar.Backend.Infrastructure.Broadcasting;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -23,14 +22,13 @@ namespace CsiRadar.Backend.Application.Processing;
 ///   3. Tap the filtered frame into <see cref="IRecordingService"/> (a no-op when
 ///      not recording) so the training set is the exact signal the model sees.
 ///   4. Once a full window has accumulated and a SlideStep has elapsed, snapshot
-///      the ring (subcarrier-major) into a pooled buffer for ML inference and
-///      enqueue the latest filtered frame onto the loss-tolerant broadcast channel.
+///      the ring (subcarrier-major) into a pooled buffer for ML inference.
 ///
 /// The filter runs once per frame, so overlapping windows are free and the IIR
 /// state is never corrupted. The consumer never awaits the network or the disk:
-/// graph frames go onto <see cref="SignalBroadcastChannelManager"/> and recording
-/// frames onto the recording channel, both via non-blocking writes — a slow
-/// SignalR client or a stalled disk cannot stall ingestion.
+/// recording frames go onto the recording channel via non-blocking writes — a stalled
+/// disk cannot stall ingestion. (The live graph is now the DSP stage's own 10 Hz
+/// <c>ReceiveDspFrame</c> tap; this path no longer broadcasts.)
 ///
 /// ONNX inference (Step 4) is wired but disabled until the trained model lands.
 /// </summary>
@@ -42,7 +40,6 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
     private readonly IOnnxModelEvaluator _modelEvaluator;
     private readonly InferenceDebouncer _debouncer;
     private readonly InferenceBroadcastChannelManager _inferenceChannel;
-    private readonly SignalBroadcastChannelManager _broadcastChannel;
     private readonly IRecordingService _recordingService;
     private readonly ProcessingOptions _options;
     private readonly ILogger<CsiProcessingBackgroundService> _logger;
@@ -59,7 +56,6 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
         IOnnxModelEvaluator modelEvaluator,
         InferenceDebouncer debouncer,
         InferenceBroadcastChannelManager inferenceChannel,
-        SignalBroadcastChannelManager broadcastChannel,
         IRecordingService recordingService,
         IOptions<ProcessingOptions> options,
         ILogger<CsiProcessingBackgroundService> logger)
@@ -70,7 +66,6 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
         _modelEvaluator = modelEvaluator;
         _debouncer = debouncer;
         _inferenceChannel = inferenceChannel;
-        _broadcastChannel = broadcastChannel;
         _recordingService = recordingService;
         _options = options.Value;
         _logger = logger;
@@ -180,9 +175,6 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
                     // Subcarrier-major window snapshot (model input layout).
                     ring.SnapshotSubcarrierMajor(windowSize, snapshot.AsSpan(0, flatLen));
 
-                    // ── Broadcast the latest filtered frame (non-blocking, loss-tolerant) ──
-                    EnqueueBroadcast(csiData, frameBuf, n);
-
                     // ── ONNX Inference (Seam A) ──
                     // The pooled snapshot is the subcarrier-major window; the evaluator
                     // copies the exact ONNX input length out of it before the finally
@@ -213,28 +205,6 @@ public sealed class CsiProcessingBackgroundService : BackgroundService
             Interlocked.Read(ref _framesConsumed),
             Interlocked.Read(ref _windowsProcessed),
             Interlocked.Read(ref _inferences));
-    }
-
-    /// <summary>
-    /// Copies the latest filtered amplitudes into a fresh DTO and enqueues it on
-    /// the loss-tolerant broadcast channel. Runs at most once per SlideStep
-    /// (~1–2 Hz), so this small allocation is off the hot path. Never awaits the
-    /// network; a full channel simply drops the oldest pending frame.
-    /// </summary>
-    private void EnqueueBroadcast(CsiData latest, float[] frameBuf, int subcarrierCount)
-    {
-        var amplitudes = new float[subcarrierCount];
-        Array.Copy(frameBuf, amplitudes, subcarrierCount);
-
-        var dto = new CsiSignalDto
-        {
-            TimestampMs = latest.TimestampTicks / TimeSpan.TicksPerMillisecond,
-            Rssi = latest.Rssi,
-            SubcarrierCount = subcarrierCount,
-            Amplitudes = amplitudes
-        };
-
-        _broadcastChannel.Writer.TryWrite(dto);
     }
 
     /// <summary>

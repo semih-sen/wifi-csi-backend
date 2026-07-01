@@ -19,7 +19,7 @@ public readonly record struct InferenceBroadcastMessage(
 /// <summary>
 /// Bounded channel decoupling inference (produced on the consumer thread) from
 /// SignalR/MQTT broadcasting (drained by <c>InferenceBroadcastBackgroundService</c>),
-/// mirroring <see cref="SignalBroadcastChannelManager"/> for graph frames.
+/// mirroring <see cref="DspBroadcastChannelManager"/> for viz frames.
 ///
 /// Inference events matter more than graph frames, so the capacity is larger; but it
 /// is still bounded with DropOldest so a wedged client can never back-pressure the

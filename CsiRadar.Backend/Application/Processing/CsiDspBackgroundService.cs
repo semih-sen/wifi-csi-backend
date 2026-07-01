@@ -1,6 +1,7 @@
 using CsiRadar.Backend.Application.Channels;
 using CsiRadar.Backend.Application.Processing.Dsp;
 using CsiRadar.Backend.Core.Entities;
+using CsiRadar.Backend.Infrastructure.Broadcasting;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -23,22 +24,39 @@ namespace CsiRadar.Backend.Application.Processing;
 /// </summary>
 public sealed class CsiDspBackgroundService : BackgroundService
 {
+    /// <summary>Viz broadcast cadence — throttle to 10 Hz, NOT the full frame rate.
+    /// Surfaced to the frontend via <c>GetServerInfo</c> (dopplerCadenceHz).</summary>
+    public const double BroadcastHz = 10.0;
+    private static readonly long BroadcastIntervalTicks =
+        (long)(TimeSpan.TicksPerSecond / BroadcastHz);
+
     private readonly DspInputChannelManager _input;
     private readonly DspOutputChannelManager _output;
+    private readonly DspBroadcastChannelManager _broadcast;
     private readonly DspDiagnostics _diagnostics;
     private readonly ILogger<CsiDspBackgroundService> _logger;
 
     private readonly RxStftHistory _rx0History = new();
     private readonly RxStftHistory _rx1History = new();
 
+    // Latest VIZ-ONLY Doppler column (mean magnitude across subcarriers, StftBins long)
+    // per RX, refreshed whenever a new STFT column is produced. Held so each 10 Hz viz
+    // frame carries the most recent Doppler even between hop boundaries. Consumer-thread
+    // only — no locking.
+    private float[] _rx0DopplerMean = [];
+    private float[] _rx1DopplerMean = [];
+    private long _lastBroadcastTicks;
+
     public CsiDspBackgroundService(
         DspInputChannelManager input,
         DspOutputChannelManager output,
+        DspBroadcastChannelManager broadcast,
         DspDiagnostics diagnostics,
         ILogger<CsiDspBackgroundService> logger)
     {
         _input = input;
         _output = output;
+        _broadcast = broadcast;
         _diagnostics = diagnostics;
         _logger = logger;
     }
@@ -59,6 +77,7 @@ public sealed class CsiDspBackgroundService : BackgroundService
 
                 _diagnostics.IncFramesProcessed();
 
+                // ── Phase 3 seam (model-facing, per-subcarrier — untouched by viz) ──
                 _output.Writer.TryWrite(new AlignedDspFrame
                 {
                     SeqNo = aligned.SeqNo,
@@ -66,6 +85,16 @@ public sealed class CsiDspBackgroundService : BackgroundService
                     Rx1 = rx1,
                     Source = aligned,
                 });
+
+                // ── Live viz tap (throttled, non-blocking, loss-tolerant) ──
+                // Refresh the cached per-RX mean-Doppler column whenever a fresh STFT
+                // column lands, so the throttled frame always carries the latest Doppler.
+                if (rx0.DopplerColumn is not null)
+                    _rx0DopplerMean = MeanAcrossSubcarriers(rx0.DopplerColumn);
+                if (rx1.DopplerColumn is not null)
+                    _rx1DopplerMean = MeanAcrossSubcarriers(rx1.DopplerColumn);
+
+                BroadcastIfDue(aligned.SeqNo, rx0, rx1);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -109,6 +138,54 @@ public sealed class CsiDspBackgroundService : BackgroundService
             SanitizedPhase = phase,
             DopplerColumn = doppler,
         };
+    }
+
+    /// <summary>
+    /// Emits one viz frame at most every <see cref="BroadcastIntervalTicks"/> (10 Hz),
+    /// never at the full frame rate. Non-blocking <c>TryWrite</c> onto a DropOldest
+    /// channel — the DSP stage never awaits SignalR. Reuses the per-frame amplitude
+    /// arrays and the cached mean-Doppler columns by reference (neither is mutated
+    /// after creation), so viz recomputes nothing.
+    /// </summary>
+    private void BroadcastIfDue(uint seqNo, RxDsp rx0, RxDsp rx1)
+    {
+        long now = DateTime.UtcNow.Ticks;
+        if (now - _lastBroadcastTicks < BroadcastIntervalTicks)
+            return;
+        _lastBroadcastTicks = now;
+
+        _broadcast.Writer.TryWrite(new DspFrameDto
+        {
+            SeqNo = seqNo,
+            Rx =
+            [
+                new DspRxDto { RxIndex = 0, Amplitude = rx0.Amplitude, DopplerMean = _rx0DopplerMean },
+                new DspRxDto { RxIndex = 1, Amplitude = rx1.Amplitude, DopplerMean = _rx1DopplerMean },
+            ],
+        });
+    }
+
+    /// <summary>
+    /// VIZ-ONLY aggregation: collapses a per-subcarrier Doppler column
+    /// <c>[subcarrier, StftBins]</c> to one <c>[StftBins]</c> column by averaging each
+    /// bin across subcarriers. The model-facing per-subcarrier column is left intact.
+    /// </summary>
+    private static float[] MeanAcrossSubcarriers(float[,] column)
+    {
+        int sc = column.GetLength(0);
+        int bins = column.GetLength(1);
+        var mean = new float[bins];
+        if (sc == 0)
+            return mean;
+
+        for (int k = 0; k < sc; k++)
+            for (int m = 0; m < bins; m++)
+                mean[m] += column[k, m];
+
+        float inv = 1f / sc;
+        for (int m = 0; m < bins; m++)
+            mean[m] *= inv;
+        return mean;
     }
 
     /// <summary>

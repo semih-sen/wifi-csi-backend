@@ -14,8 +14,8 @@ namespace CsiRadar.Backend.Infrastructure.Broadcasting;
 /// Implements <see cref="IBroadcastService"/> using SignalR for inference-result
 /// streaming and MQTT for Home Assistant automation triggers.
 ///
-/// High-frequency CSI graph frames are handled separately by
-/// <see cref="BroadcastBackgroundService"/> (channel-drained), not here.
+/// High-frequency viz frames are handled separately by
+/// <see cref="DspBroadcastBackgroundService"/> (channel-drained), not here.
 ///
 /// SignalR client methods emitted here:
 ///   - "ReceiveInference": Receives ONNX inference results (predicted labels)
