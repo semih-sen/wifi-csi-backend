@@ -53,6 +53,11 @@ builder.Services.AddSingleton<DspInputChannelManager>();
 builder.Services.AddSingleton<DspOutputChannelManager>();
 builder.Services.AddSingleton<DspDiagnostics>();
 
+// Phase 3 fusion + windowing stage: consumes the DSP output channel, emits the fused
+// multi-modal window onto the fused-window channel (the Phase 4 seam) + its counters.
+builder.Services.AddSingleton<FusedWindowChannelManager>();
+builder.Services.AddSingleton<FusionDiagnostics>();
+
 // DSP viz broadcast channel (depth 2, DropOldest): the 10 Hz per-RX amplitude+Doppler
 // tap that feeds the frontend, decoupled from the DSP stage. Replaces the retired V1
 // single-RX graph broadcast.
@@ -143,6 +148,10 @@ builder.Services.AddHostedService<CsiAlignmentBackgroundService>();
 // Per-RX DSP: derives amplitude + sanitized phase + Doppler from each RX (V2 Phase 2).
 builder.Services.AddHostedService<CsiDspBackgroundService>();
 
+// Fusion + windowing: assembles the fused multi-modal window (dense + Doppler) and emits
+// it onto the Phase 4 seam; rejects windows spanning an alignment gap (V2 Phase 3).
+builder.Services.AddHostedService<CsiFusionWindowBackgroundService>();
+
 // Consumer: Processing pipeline that reads from the channel,
 // filters signals, and runs inference/recording (RX0). No longer broadcasts a graph.
 builder.Services.AddHostedService<CsiProcessingBackgroundService>();
@@ -190,6 +199,7 @@ app.MapGet("/health", (
     IRecordingService recording,
     IngestionDiagnostics ingestion,
     DspDiagnostics dsp,
+    FusionDiagnostics fusion,
     Microsoft.Extensions.Options.IOptions<ProcessingOptions> processing) =>
 {
     var p = processing.Value;
@@ -203,6 +213,9 @@ app.MapGet("/health", (
         ingestion = ingestion.Snapshot(),
         // V2 Phase 2 exit-criteria surface: per-RX DSP frame rate + Doppler columns.
         dsp = dsp.Snapshot(),
+        // V2 Phase 3 exit-criteria surface: windows emitted, gap-rejected count, last
+        // window shape/seqNo range (fused multi-modal model input).
+        fusion = fusion.Snapshot(),
         processing = new
         {
             p.WindowSize,
